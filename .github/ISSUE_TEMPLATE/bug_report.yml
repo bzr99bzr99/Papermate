@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a bug in PaperMate
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please fill in as much information as possible.
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, Node.js version, and installation method.
+      placeholder: "Windows 11, Edge 130, Node 22, one-click installer"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: What happened and what did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that lead to the problem.
+      placeholder: |
+        1. Open PaperMate
+        2. Import a PDF
+        3. Select a paragraph
+        4. Observe the error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Add browser console output, terminal output, or screenshots if possible.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I removed API keys, passwords, private PDFs, and personal data.
+          required: true
