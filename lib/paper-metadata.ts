@@ -52,6 +52,8 @@ interface CrossrefResponse {
 
 const LOOKUP_TIMEOUT_MS = 8000;
 const MAX_TEXT_CHARS = 60000;
+// OpenAlex 礼貌池：请求带 mailto 可显著降低 429 限流概率。
+const OPENALEX_MAILTO = "mailto=papermate%40localhost";
 
 function firstString(value: unknown): string | undefined {
   const values = toStringArray(value);
@@ -79,18 +81,30 @@ async function fetchJson(
   fetcher: typeof fetch,
   url: string,
 ): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LOOKUP_TIMEOUT_MS);
-  try {
-    const response = await fetcher(url, {
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`metadata request failed: ${response.status}`);
-    return (await response.json()) as unknown;
-  } finally {
-    clearTimeout(timer);
+  // 429/5xx 是可重试的上游错误：OpenAlex 无 key 时经常限流，退避重试一次再放弃。
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), LOOKUP_TIMEOUT_MS);
+    try {
+      const response = await fetcher(url, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        return (await response.json()) as unknown;
+      }
+      lastStatus = response.status;
+      const retryable = response.status === 429 || response.status >= 500;
+      if (!retryable) throw new Error(`metadata request failed: ${response.status}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
   }
+  throw new Error(`metadata request failed: ${lastStatus || "unknown"}`);
 }
 
 export function extractDoi(text: string): string | undefined {
@@ -566,7 +580,7 @@ async function fetchOpenAlexSource(
 ): Promise<OpenAlexSource | undefined> {
   const data = (await fetchJson(
     fetcher,
-    `https://api.openalex.org/sources?filter=issn:${encodeURIComponent(issn)}&per-page=5`,
+    `https://api.openalex.org/sources?filter=issn:${encodeURIComponent(issn)}&per-page=5&${OPENALEX_MAILTO}`,
   )) as { results?: OpenAlexSource[] };
   return data.results?.find(
     (source) => source.display_name || source.summary_stats,
@@ -592,7 +606,7 @@ async function fetchOpenAlex(
     try {
       const data = (await fetchJson(
         fetcher,
-        `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`,
+        `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?${OPENALEX_MAILTO}`,
       )) as OpenAlexWork;
       if (data.primary_location?.source || data.keywords) {
         source = data.primary_location?.source;
@@ -616,7 +630,7 @@ async function fetchOpenAlex(
   try {
     const data = (await fetchJson(
       fetcher,
-      `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=5`,
+      `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=5&${OPENALEX_MAILTO}`,
     )) as OpenAlexResponse;
     const item = chooseBestMatch(data.results ?? [], query);
     if (!item) return { source, keywords, title, titleScore };

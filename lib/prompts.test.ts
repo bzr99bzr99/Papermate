@@ -38,4 +38,16 @@ describe("task prompts", () => {
     expect(prompt).toContain("补充解释");
     expect(prompt).toContain("边界与不确定处");
   });
+
+  it("turns the current paper into a writing-craft lesson grounded in the text", () => {
+    const prompt = taskInstructions.writing;
+    expect(prompt).toContain("作者是怎样把这篇论文写好的");
+    expect(prompt).toContain("唯一教学样本");
+    expect(prompt).toContain("不要脱离本文泛泛讲授论文写作规则");
+    expect(prompt).toContain("论点→支撑证据");
+    expect(prompt).toContain("可迁移的写作技巧清单");
+    expect(prompt).toContain("标页码");
+    expect(prompt).toContain("只能引用提供给你的原文");
+    expect(prompt).toContain("原文未明确说明");
+  });
 });

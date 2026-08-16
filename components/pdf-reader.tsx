@@ -17,6 +17,7 @@ import {
   PanelLeftOpen,
   PanelRightOpen,
   RotateCcw,
+  Trash2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -26,16 +27,23 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import {
   clampReaderZoom,
+  continuousReaderZoom,
   formatAnchorExcerpt,
   flattenPdfOutline,
   inferSectionsFromPages,
   makeAnchor,
+  MAX_READER_ZOOM,
+  MIN_READER_ZOOM,
+  normalizeReaderWheelDelta,
+  normalizeLinkRect,
   paragraphBlocksFromLines,
+  sectionHeadingTopRatio,
   stepReaderZoom,
   textLinesFromItems,
 } from "@/lib/pdf";
 import type { PdfOutlineNode } from "@/lib/pdf";
 import type {
+  CitationTarget,
   Conversation,
   ChatTurn,
   HighlightColor,
@@ -43,6 +51,7 @@ import type {
   Paper,
   PaperSection,
   ParsedPage,
+  PdfLinkAnnotation,
   PdfTextItem,
   TextAnchor,
 } from "@/lib/types";
@@ -50,6 +59,8 @@ import type {
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 type PdfJsDocument = Awaited<ReturnType<PdfJsModule["getDocument"]>["promise"]>;
 type PdfJsPage = Awaited<ReturnType<PdfJsDocument["getPage"]>>;
+type MutableNumberRef = { current: number };
+type MutableBooleanRef = { current: boolean };
 
 let pdfjsPromise: Promise<PdfJsModule> | undefined;
 
@@ -108,6 +119,112 @@ function buildTextItems(
     }));
 }
 
+interface PdfJsAnnotation {
+  subtype?: string;
+  rect?: number[];
+  dest?: unknown;
+  url?: unknown;
+}
+
+/**
+ * 收集页面上的原生 Link 注解：只保留带内部目标（dest）或外部 URL 的链接，
+ * 矩形转换为 scale=1 视口坐标（相对页面左上角，top 向下）。
+ */
+async function buildPageLinks(
+  page: PdfJsPage,
+  document: PdfJsDocument,
+  viewport: PdfJsViewport,
+): Promise<PdfLinkAnnotation[] | undefined> {
+  try {
+    const annotations = (await page.getAnnotations().catch(() => [])) as PdfJsAnnotation[];
+    const links: PdfLinkAnnotation[] = [];
+    for (const annotation of annotations) {
+      if (annotation.subtype !== "Link" || !Array.isArray(annotation.rect) || annotation.rect.length < 4) {
+        continue;
+      }
+      let targetPage: number | undefined;
+      let targetTop: number | undefined;
+      let url: string | undefined;
+      if (typeof annotation.url === "string" && /^https?:\/\//i.test(annotation.url)) {
+        url = annotation.url;
+      } else if (annotation.dest !== undefined && annotation.dest !== null) {
+        const resolved = await resolveAnnotationDest(document, annotation.dest, viewport);
+        targetPage = resolved?.page;
+        targetTop = resolved?.top;
+      }
+      if (targetPage === undefined && url === undefined) continue;
+      const converted = viewport.convertToViewportRectangle(
+        annotation.rect.slice(0, 4) as [number, number, number, number],
+      );
+      if (!converted || converted.length < 4) continue;
+      // convertToViewportRectangle 返回 [x1, y1, x2, y2]，其中 y1/y2 分别是视口
+      // 坐标的下边/上边（PDF y 轴向上被翻转），这里统一规范化为 [left, top, right, bottom]。
+      links.push({
+        rect: normalizeLinkRect(converted),
+        targetPage,
+        targetTop,
+        url,
+      });
+    }
+    return links.length ? links : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ResolvedLinkTarget {
+  page: number;
+  top?: number;
+}
+
+async function resolveAnnotationDest(
+  document: PdfJsDocument,
+  dest: unknown,
+  viewport: PdfJsViewport,
+): Promise<ResolvedLinkTarget | undefined> {
+  try {
+    let destination: unknown[] | null = Array.isArray(dest) ? dest : null;
+    if (!destination && typeof dest === "string" && dest.trim()) {
+      destination = await document.getDestination(dest).catch(() => null);
+    }
+    if (!destination || destination.length === 0) return undefined;
+    const pageReference = destination[0] as { num: number; gen: number };
+    if (!pageReference || typeof pageReference !== "object" || typeof pageReference.num !== "number") {
+      return undefined;
+    }
+    const pageIndex = await document
+      .getPageIndex(pageReference as never)
+      .catch(() => -1);
+    if (!Number.isFinite(pageIndex) || pageIndex < 0) return undefined;
+
+    // 目标坐标：现代格式 [pageRef, {name}, left, top, zoom]；老式格式 [pageRef, x, y, zoom]。
+    // PDF 坐标 y 向上、原点在左下角，换算成视口 y（向下、原点左上）。
+    let topPdf: number | undefined;
+    const second = destination[1];
+    if (second && typeof second === "object" && "name" in second) {
+      const name = String((second as { name: unknown }).name);
+      if (name === "XYZ" || name === "FitH" || name === "FitR") {
+        const candidate =
+          name === "XYZ" ? destination[3] : name === "FitH" ? destination[2] : destination[4];
+        if (typeof candidate === "number") topPdf = candidate;
+      }
+    } else if (typeof second === "number" && typeof destination[2] === "number") {
+      topPdf = destination[2];
+    }
+
+    let top: number | undefined;
+    if (topPdf !== undefined) {
+      const point = viewport.convertToViewportPoint(0, topPdf);
+      if (Array.isArray(point) && point.length >= 2 && Number.isFinite(point[1])) {
+        top = Math.max(0, point[1]);
+      }
+    }
+    return { page: pageIndex + 1, top };
+  } catch {
+    return undefined;
+  }
+}
+
 async function buildParsedPages(file: File): Promise<Omit<ParsedPdf, "originalReady">> {
   const pdfjs = await getPdfJs();
   const buffer = new Uint8Array(await file.arrayBuffer());
@@ -135,11 +252,13 @@ async function buildParsedPages(file: File): Promise<Omit<ParsedPdf, "originalRe
         }
       }
       const blocks = paragraphBlocksFromLines(pageNumber, lines);
+      const links = await buildPageLinks(page, document, viewport);
       pages.push({
         page: pageNumber,
         text: blocks.map((block) => block.text).join("\n"),
         blocks,
         figures: [],
+        links,
         width: viewport.width,
         height: viewport.height,
         rotation: viewport.rotation,
@@ -200,6 +319,7 @@ export async function repairPaperOriginalMetadata(paper: Paper): Promise<Paper> 
         height: metadataPage.height,
         rotation: metadataPage.rotation,
         textItems: metadataPage.textItems,
+        links: metadataPage.links,
       };
     });
     return {
@@ -222,6 +342,7 @@ type PdfJsTextContent = Awaited<ReturnType<PdfJsPage["getTextContent"]>>;
 
 export interface ChapterScrollRequest {
   page: number;
+  sectionId: string;
   nonce: number;
 }
 
@@ -243,6 +364,21 @@ function sectionForPage(sections: PaperSection[], page: number): PaperSection | 
   return active;
 }
 
+function sectionStartTop(
+  reader: HTMLElement,
+  paperData: Paper,
+  section: PaperSection,
+): number | undefined {
+  const pageElement = reader.querySelector<HTMLElement>(`[data-page="${section.page}"]`);
+  const stack = pageElement?.querySelector<HTMLElement>(".original-page-stack");
+  const pageData = paperData.pages.find((page) => page.page === section.page);
+  if (!stack || !pageData) return undefined;
+  const ratio = sectionHeadingTopRatio(pageData, section.title);
+  if (ratio === undefined) return undefined;
+  const stackRect = stack.getBoundingClientRect();
+  return stackRect.top + ratio * stackRect.height;
+}
+
 function findQuoteStart(page: ParsedPage, quote: string): number {
   const direct = page.text.indexOf(quote);
   if (direct >= 0) return direct;
@@ -261,15 +397,34 @@ function findQuoteStart(page: ParsedPage, quote: string): number {
 }
 
 const READER_ZOOM_KEY = "papermate-reader-zoom-v1";
-const ZOOM_COMMIT_DELAY_MS = 90;
+const ZOOM_COMMIT_IDLE_MS = 400;
+// 单页 canvas 位图像素预算：高缩放时按比例降低有效 DPR，控制栅格化成本与内存。
+const MAX_RASTER_PIXELS = 12_000_000;
+const RASTER_ZOOM_OVERSCAN = 1.25;
 const CLICK_MOVE_THRESHOLD = 5;
 
 interface PendingZoomAnchor {
   page: number;
+  shell: HTMLElement;
+  stack: HTMLElement;
   clientX: number;
   clientY: number;
   xRatio: number;
   yRatio: number;
+}
+
+interface ZoomPageLayout {
+  shell: HTMLElement;
+  stack: HTMLElement;
+  baseWidth: number;
+  baseHeight: number;
+  renderedZoom: number;
+}
+
+interface ZoomSession {
+  anchor: PendingZoomAnchor | null;
+  pages: ZoomPageLayout[];
+  containerWidth: number;
 }
 
 interface ClientRectLike {
@@ -974,6 +1129,7 @@ function appendHighlightRects(
   rects: ClientRectLike[],
   anchorId?: string,
   region?: HighlightRegion,
+  fallbackColor?: HighlightColor,
 ) {
   const layerRect = layer.getBoundingClientRect();
   const scaleX = layerRect.width && layer.offsetWidth
@@ -991,6 +1147,10 @@ function appendHighlightRects(
       piece.dataset.conversationIds = JSON.stringify(region.conversationIds);
       piece.dataset.highlightColor = region.color;
       piece.style.setProperty("--hl-color", region.color);
+    } else if (fallbackColor) {
+      // 尚未提问的划选选区：用待用颜色着色，切换颜色即时生效。
+      piece.dataset.highlightColor = fallbackColor;
+      piece.style.setProperty("--hl-color", fallbackColor);
     }
     piece.style.left = `${(rect.left - layerRect.left) / scaleX}px`;
     piece.style.top = `${(rect.top - layerRect.top) / scaleY}px`;
@@ -1006,6 +1166,7 @@ function renderPersistentHighlights(
   page: ParsedPage,
   anchors: TextAnchor[],
   regions: HighlightRegion[],
+  pendingColor?: HighlightColor,
 ) {
   layer.replaceChildren();
   const renderedRegionIds = new Set<string>();
@@ -1088,6 +1249,8 @@ function renderPersistentHighlights(
       layer,
       normalizedClientRects(range, stack, allowedSpans, selectionBounds),
       anchor.id,
+      undefined,
+      pendingColor,
     );
   }
 }
@@ -1096,6 +1259,50 @@ function clearCurrentSelectionHighlights(root: HTMLElement | null | undefined) {
   root
     ?.querySelectorAll<HTMLElement>('[data-highlight-role="current"]')
     .forEach((layer) => layer.replaceChildren());
+}
+
+/**
+ * 渲染 PDF 原生 Link 注解层：每个链接按注解矩形定位（相对页面左上角，
+ * scale=1 视口坐标），点击后跳转目标页或打开外部 URL。
+ * 不做文本匹配：原 PDF 没有链接的区域不显示跳转。
+ */
+function renderPageLinks(
+  layer: HTMLElement | null | undefined,
+  stack: HTMLElement | null | undefined,
+  links: PdfLinkAnnotation[] | undefined,
+  savedPage: ParsedPage,
+  onJump: (target: CitationTarget) => void,
+  onOpenUrl: (url: string) => void,
+) {
+  if (!layer || !stack || !links?.length) return;
+  layer.replaceChildren();
+  const pageWidth = savedPage.width || 0;
+  const pageHeight = savedPage.height || 0;
+  if (!pageWidth || !pageHeight) return;
+  const scaleX = stack.offsetWidth && pageWidth ? stack.offsetWidth / pageWidth : 1;
+  const scaleY = stack.offsetHeight && pageHeight ? stack.offsetHeight / pageHeight : 1;
+
+  for (const link of links) {
+    // 存量数据可能存了 y 顺序颠倒的矩形（PDF y 轴翻转导致），渲染前统一规范化。
+    const [left, top, right, bottom] = normalizeLinkRect(link.rect);
+    if (right <= left || bottom <= top) continue;
+    const piece = document.createElement("button");
+    piece.type = "button";
+    piece.className = "original-citation-link";
+    piece.title = link.url ? link.url : `跳转到第 ${link.targetPage} 页`;
+    piece.style.left = `${Math.round(left * scaleX)}px`;
+    piece.style.top = `${Math.round(top * scaleY)}px`;
+    piece.style.width = `${Math.max(2, Math.round((right - left) * scaleX))}px`;
+    piece.style.height = `${Math.max(2, Math.round((bottom - top) * scaleY))}px`;
+    piece.addEventListener("pointerdown", (event) => event.stopPropagation());
+    piece.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (link.url) onOpenUrl(link.url);
+      else if (link.targetPage) onJump({ page: link.targetPage, top: link.targetTop ?? 0 });
+    });
+    layer.append(piece);
+  }
 }
 
 function renderCurrentSelectionBetweenPoints(
@@ -1139,23 +1346,49 @@ function renderCurrentSelectionBetweenPoints(
   );
 }
 
-function useReaderWidth(readerRef: RefObject<HTMLElement | null>) {
+function useReaderWidth(
+  readerRef: RefObject<HTMLElement | null>,
+  scalingRef?: MutableBooleanRef,
+  refreshKey?: number,
+) {
   const [width, setWidth] = useState(0);
 
   useEffect(() => {
     const element = readerRef.current;
     if (!element) return;
+    let frame = 0;
     const measure = () => {
+      frame = 0;
+      if (scalingRef?.current) return;
       const style = window.getComputedStyle(element);
       const horizontalPadding =
         (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
       setWidth(Math.max(260, element.clientWidth - horizontalPadding));
     };
+    const schedule = () => {
+      // 拖动侧边栏期间冻结阅读器宽度：页面保持原尺寸与位置，避免内容随拖拽
+      // 逐帧重排造成滚动跳动；拖动结束（papermate-resize-settled）后立即重测。
+      if (document.body.classList.contains("papermate-resizing")) return;
+      // rAF 合并：一帧内多次尺寸变化只提交一次，避免逐帧触发 React 渲染。
+      if (scalingRef?.current) return;
+      if (frame) return;
+      frame = window.requestAnimationFrame(measure);
+    };
+    const onSettled = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = 0;
+      if (!document.body.classList.contains("papermate-resizing")) measure();
+    };
     measure();
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver(schedule);
     observer.observe(element);
-    return () => observer.disconnect();
-  }, [readerRef]);
+    window.addEventListener("papermate-resize-settled", onSettled);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("papermate-resize-settled", onSettled);
+    };
+  }, [readerRef, refreshKey, scalingRef]);
 
   return width;
 }
@@ -1164,17 +1397,39 @@ function applyStackLiveZoom(
   shell: HTMLElement | null,
   stack: HTMLElement,
   factor: number,
+  baseLayoutHeight?: number,
+  baseLayoutWidth?: number,
+  containerWidth?: number,
 ) {
-  stack.style.transformOrigin = "0 0";
+  // 实时缩放只作用于 .original-page-stack（页面本体），上方的 P.XX 页码标签保持恒定大小。
+  // 提交后 .original-page 的真实宽度是 min(目标页宽, 容器宽)，并由 auto margin 居中；
+  // 实时阶段必须同步这个 shell 宽度，否则横向滚动范围仍按旧页宽计算，提交瞬间页面会
+  // 重新居中，光标下的内容随之漂移。transform-origin 再根据 stack 在 shell 内的真实
+  // auto margin 位置计算，使缩放中的视觉页框与提交后的布局完全一致。
   if (Number.isFinite(factor) && factor > 0 && factor !== 1) {
+    const layoutWidth = baseLayoutWidth ?? (stack.offsetWidth || 1);
+    const nextLayoutWidth = layoutWidth * factor;
+    const container = containerWidth && containerWidth > 0 ? containerWidth : layoutWidth;
+    const targetShellWidth = Math.min(nextLayoutWidth, container);
+    if (shell) shell.style.width = `${targetShellWidth}px`;
+    // stack 的 auto margin：子元素不宽于 shell 时居中，宽于 shell 时左缘贴 shell。
+    const stackLeft = layoutWidth <= targetShellWidth ? (targetShellWidth - layoutWidth) / 2 : 0;
+    const originX = stackLeft / (layoutWidth * (factor - 1));
+    stack.style.transformOrigin = `${(Number.isFinite(originX) ? originX : 0.5) * 100}% 0`;
     stack.style.transform = `scale(${factor})`;
     stack.classList.add("is-live-zooming");
-    const layoutHeight = stack.offsetHeight || 1;
+    // 只按 stack 高度补偿（不含页码标签），使实时缩放期间的网格槽高与缩放提交后完全一致：
+    // 下方页面不会先下移再回弹，也不会触发多余的 ResizeObserver 重渲染。
+    const layoutHeight = baseLayoutHeight ?? (stack.offsetHeight || 1);
     if (shell) shell.style.marginBottom = `${20 + (factor - 1) * layoutHeight}px`;
   } else {
+    stack.style.transformOrigin = "50% 0";
     stack.style.transform = "";
     stack.classList.remove("is-live-zooming");
-    if (shell) shell.style.marginBottom = "";
+    if (shell) {
+      shell.style.width = "";
+      shell.style.marginBottom = "";
+    }
   }
 }
 
@@ -1185,9 +1440,12 @@ function OriginalPage({
   readerRef,
   shouldRender,
   zoom,
-  displayZoom,
+  liveZoomRef,
   persistentAnchors,
   highlightRegions,
+  pendingColor,
+  onJump,
+  onOpenUrl,
 }: {
   document?: PdfJsDocument;
   savedPage: ParsedPage;
@@ -1195,29 +1453,35 @@ function OriginalPage({
   readerRef: RefObject<HTMLElement | null>;
   shouldRender: boolean;
   zoom: number;
-  displayZoom: number;
+  liveZoomRef: MutableNumberRef;
   persistentAnchors: TextAnchor[];
   highlightRegions: HighlightRegion[];
+  pendingColor?: HighlightColor;
+  onJump: (target: CitationTarget) => void;
+  onOpenUrl: (url: string) => void;
 }) {
   const shellRef = useRef<HTMLElement>(null);
   const stackRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // 离屏渲染用 scratch canvas：尺寸匹配时复用，避免来回缩放时反复分配大块位图内存。
+  const scratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const persistentHighlightRef = useRef<HTMLDivElement>(null);
-  const highlightDataRef = useRef({ persistentAnchors, highlightRegions });
+  const citationLayerRef = useRef<HTMLDivElement>(null);
+  const citationHandlersRef = useRef({ onJump, onOpenUrl });
+  citationHandlersRef.current = { onJump, onOpenUrl };
+  const highlightDataRef = useRef({ persistentAnchors, highlightRegions, pendingColor });
   const pageRef = useRef<PdfJsPage | null>(null);
   const textContentRef = useRef<Promise<PdfJsTextContent> | null>(null);
   const renderedViewportRef = useRef<PdfJsViewport | undefined>(undefined);
   const renderedZoomRef = useRef(zoom);
-  const displayZoomRef = useRef(displayZoom);
-  displayZoomRef.current = displayZoom;
   const [baseViewport, setBaseViewport] = useState<PdfJsViewport>();
   const [viewport, setViewport] = useState<PdfJsViewport>();
   const [renderState, setRenderState] = useState<"idle" | "loading" | "ready" | "error">("idle");
 
   useEffect(() => {
-    highlightDataRef.current = { persistentAnchors, highlightRegions };
-  }, [highlightRegions, persistentAnchors]);
+    highlightDataRef.current = { persistentAnchors, highlightRegions, pendingColor };
+  }, [highlightRegions, pendingColor, persistentAnchors]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1239,9 +1503,9 @@ function OriginalPage({
     if (!shell || !stack || !rendered) return;
     stack.style.width = `${Math.round(rendered.width)}px`;
     stack.style.height = `${Math.round(rendered.height)}px`;
-    const factor = displayZoom / renderedZoomRef.current;
-    applyStackLiveZoom(shell, stack, factor);
-  }, [availableWidth, baseViewport, displayZoom, renderState, savedPage, shouldRender, viewport, zoom]);
+    const factor = liveZoomRef.current / renderedZoomRef.current;
+    applyStackLiveZoom(shell, stack, factor, undefined, undefined, availableWidth);
+  }, [availableWidth, baseViewport, liveZoomRef, renderState, savedPage, shouldRender, viewport, zoom]);
 
   useEffect(() => {
     if (!shouldRender || !baseViewport || !pageRef.current || availableWidth <= 0) return;
@@ -1264,14 +1528,46 @@ function OriginalPage({
       if (!page || !baseViewport) return;
       const fitScale = Math.min(1, availableWidth / baseViewport.width);
       const nextViewport = page.getViewport({ scale: Math.max(0.4, fitScale * zoom) });
+      // 位图按 1.25x 栅格余量渲染，实时缩放期间最多 1.25x 内仍保持清晰；
+      // 布局与文本层仍用逻辑 viewport，避免产生额外横向滚动条。
+      const rasterViewport = page.getViewport({
+        scale: Math.max(0.4, fitScale * zoom * RASTER_ZOOM_OVERSCAN),
+      });
       if (!canvas || !textLayerContainer || !stack || !highlightLayer) return;
+
+      // 渲染尺寸未变化（例如拖动侧边栏但阅读器仍宽于页面、或窗口尺寸变化不改变
+      // 缩放比例）时直接跳过重绘，避免无谓的 canvas 重栅格与文本层重建。
+      const rendered = renderedViewportRef.current;
+      if (
+        rendered &&
+        renderedZoomRef.current === zoom &&
+        Math.abs(rendered.scale - nextViewport.scale) < 1e-6
+      ) {
+        return;
+      }
 
       const hasVisibleContent = Boolean(renderedViewportRef.current);
       if (!hasVisibleContent) setRenderState("loading");
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const nextCanvas = document.createElement("canvas");
-      nextCanvas.width = Math.max(1, Math.ceil(nextViewport.width * pixelRatio));
-      nextCanvas.height = Math.max(1, Math.ceil(nextViewport.height * pixelRatio));
+      // 高缩放时按像素预算降低有效 DPR：位图尺寸有界，栅格化成本与内存不随缩放平方级增长；
+      // 低缩放保持设备 DPR（上限 2），不损失清晰度。
+      const budgetRatio = Math.sqrt(
+        MAX_RASTER_PIXELS / Math.max(1, rasterViewport.width * rasterViewport.height),
+      );
+      const pixelRatio = Math.max(
+        0.5,
+        Math.min(window.devicePixelRatio || 1, 2, budgetRatio),
+      );
+      const nextCanvasWidth = Math.max(1, Math.ceil(rasterViewport.width * pixelRatio));
+      const nextCanvasHeight = Math.max(1, Math.ceil(rasterViewport.height * pixelRatio));
+      const scratch = scratchCanvasRef.current;
+      const nextCanvas =
+        scratch &&
+        scratch.width === nextCanvasWidth &&
+        scratch.height === nextCanvasHeight
+          ? scratch
+          : (scratchCanvasRef.current = document.createElement("canvas"));
+      nextCanvas.width = nextCanvasWidth;
+      nextCanvas.height = nextCanvasHeight;
       const nextContext = nextCanvas.getContext("2d", { alpha: false });
       if (!nextContext) throw new Error("无法创建原版页面画布。");
       nextContext.fillStyle = "#ffffff";
@@ -1279,7 +1575,7 @@ function OriginalPage({
       renderTask = page.render({
         canvasContext: nextContext,
         canvas: nextCanvas,
-        viewport: nextViewport,
+        viewport: rasterViewport,
         transform: pixelRatio === 1 ? undefined : [pixelRatio, 0, 0, pixelRatio, 0, 0],
       });
 
@@ -1302,6 +1598,21 @@ function OriginalPage({
       if (cancelled) return;
       spanBoundsForTextLayer(textLayer, savedPage);
 
+      if (cancelled) return;
+
+      canvas.width = nextCanvas.width;
+      canvas.height = nextCanvas.height;
+      canvas.style.width = `${Math.round(nextViewport.width)}px`;
+      canvas.style.height = `${Math.round(nextViewport.height)}px`;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (context) context.drawImage(nextCanvas, 0, 0);
+
+      // 先把新文本层换入 DOM：高亮矩形必须基于新缩放后的 span 计算。
+      // 若在换入前计算，stack 里仍残留旧缩放位置的 span（旧文本层还在），
+      // 得到的矩形坐标是旧的，换入后高亮就停在旧位置，直到点击才重绘。
+      textLayerContainer.replaceChildren(...Array.from(pendingTextLayer.childNodes));
+      textLayerContainer.style.setProperty("--total-scale-factor", String(nextViewport.scale));
+
       pendingHighlightLayer = document.createElement("div");
       pendingHighlightLayer.className = "original-selection-highlight persistent";
       pendingHighlightLayer.dataset.highlightRole = "persistent";
@@ -1313,20 +1624,10 @@ function OriginalPage({
         savedPage,
         highlightDataRef.current.persistentAnchors,
         highlightDataRef.current.highlightRegions,
+        highlightDataRef.current.pendingColor,
       );
-      if (cancelled) return;
 
-      canvas.width = nextCanvas.width;
-      canvas.height = nextCanvas.height;
-      canvas.style.width = `${Math.round(nextViewport.width)}px`;
-      canvas.style.height = `${Math.round(nextViewport.height)}px`;
-      const context = canvas.getContext("2d", { alpha: false });
-      if (context) context.drawImage(nextCanvas, 0, 0);
-
-      textLayerContainer.replaceChildren(...Array.from(pendingTextLayer.childNodes));
-      textLayerContainer.style.setProperty("--total-scale-factor", String(nextViewport.scale));
       pendingTextLayer.remove();
-
       highlightLayer.replaceChildren(...Array.from(pendingHighlightLayer.childNodes));
       pendingHighlightLayer.remove();
 
@@ -1335,7 +1636,19 @@ function OriginalPage({
       stack.dataset.renderedZoom = String(zoom);
       stack.style.width = `${Math.round(nextViewport.width)}px`;
       stack.style.height = `${Math.round(nextViewport.height)}px`;
-      applyStackLiveZoom(shell, stack, displayZoomRef.current / zoom);
+      applyStackLiveZoom(shell, stack, liveZoomRef.current / zoom, undefined, undefined, availableWidth);
+
+      // 渲染 PDF 原生链接层（基于注解矩形，无文本匹配）。
+      // 必须在 stack 尺寸更新之后再计算，否则链接位置会按旧尺寸错位。
+      renderPageLinks(
+        citationLayerRef.current,
+        stack,
+        savedPage.links,
+        savedPage,
+        citationHandlersRef.current.onJump,
+        citationHandlersRef.current.onOpenUrl,
+      );
+
       setViewport(nextViewport);
       if (!cancelled) setRenderState("ready");
     };
@@ -1354,16 +1667,20 @@ function OriginalPage({
       if (!shouldRender) {
         renderedViewportRef.current = undefined;
         stack?.removeAttribute("data-rendered-zoom");
+        // 实时缩放 transform 现在加在 stack 上，shell 只保留 marginBottom 补偿。
         stack?.classList.remove("is-live-zooming");
-        if (stack) stack.style.transform = "";
-        if (shell) shell.style.marginBottom = "";
+        stack?.style.removeProperty("transform");
+        if (shell) {
+          shell.style.width = "";
+          shell.style.marginBottom = "";
+        }
         if (canvas) canvas.width = canvas.height = 0;
         textLayerContainer?.replaceChildren();
         highlightLayer?.replaceChildren();
       }
       if (!cancelled) setRenderState("idle");
     };
-  }, [availableWidth, baseViewport, savedPage, shouldRender, zoom]);
+  }, [availableWidth, baseViewport, liveZoomRef, savedPage, shouldRender, zoom]);
 
   const persistentAnchorKey = persistentAnchors.map((anchor) => anchor.id).join("|");
   const highlightRegionKey = highlightRegions
@@ -1392,6 +1709,7 @@ function OriginalPage({
         savedPage,
         highlightDataRef.current.persistentAnchors,
         highlightDataRef.current.highlightRegions,
+        highlightDataRef.current.pendingColor,
       );
     };
     draw();
@@ -1401,14 +1719,17 @@ function OriginalPage({
       layer.replaceChildren();
     };
   }, [
-    displayZoom,
+    // 注意：不依赖 displayZoom。实时缩放是 CSS transform，高亮随 stack 一起缩放；
+    // 缩放提交（zoom 变化）后页面按新比例重绘，这里靠 viewport/zoom 依赖重新计算。
     highlightRegionKey,
     highlightRegions,
+    pendingColor,
     persistentAnchorKey,
     persistentAnchors,
     renderState,
     savedPage,
     shouldRender,
+    viewport,
     zoom,
   ]);
 
@@ -1440,6 +1761,7 @@ function OriginalPage({
         <div ref={textLayerRef} className="original-text-layer" />
         <div ref={persistentHighlightRef} className="original-selection-highlight persistent" data-highlight-role="persistent" />
         <div className="original-selection-highlight current" data-highlight-role="current" />
+        <div ref={citationLayerRef} className="original-citation-links" />
         {renderState === "loading" ? (
           <div className="original-page-loading" aria-live="polite"><LoaderCircle className="spin" size={20} /></div>
         ) : null}
@@ -1454,22 +1776,33 @@ function OriginalPdfView({
   readerRef,
   zoom,
   displayZoom,
+  liveZoomRef,
+  scalingRef,
   persistentAnchors,
   highlightRegions,
+  pendingColor,
+  onJump,
+  onOpenUrl,
 }: {
   paper: Paper;
   readerRef: RefObject<HTMLElement | null>;
   zoom: number;
   displayZoom: number;
+  liveZoomRef: MutableNumberRef;
+  scalingRef: MutableBooleanRef;
   persistentAnchors: TextAnchor[];
   highlightRegions: HighlightRegion[];
+  pendingColor?: HighlightColor;
+  onJump: (target: CitationTarget) => void;
+  onOpenUrl: (url: string) => void;
 }) {
   const [document, setDocument] = useState<PdfJsDocument>();
   const [error, setError] = useState<string>();
   const [renderWindow, setRenderWindow] = useState({ start: 1, end: 1 });
   const pagesRef = useRef<HTMLDivElement>(null);
-  const availableWidth = useReaderWidth(readerRef);
+  const availableWidth = useReaderWidth(readerRef, scalingRef, displayZoom);
   const renderFrameRef = useRef<number | null>(null);
+  const commitFrameRef = useRef<number | null>(null);
 
   const updateRenderWindow = useCallback(() => {
     const root = readerRef.current;
@@ -1501,9 +1834,11 @@ function OriginalPdfView({
     if (!root) return;
 
     const schedule = () => {
+      if (scalingRef.current) return;
       if (renderFrameRef.current !== null) return;
       renderFrameRef.current = window.requestAnimationFrame(() => {
         renderFrameRef.current = null;
+        if (scalingRef.current) return;
         updateRenderWindow();
       });
     };
@@ -1520,7 +1855,21 @@ function OriginalPdfView({
       root.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", schedule);
     };
-  }, [availableWidth, document, paper.id, paper.pages.length, readerRef, updateRenderWindow]);
+  }, [availableWidth, document, paper.id, paper.pages.length, readerRef, scalingRef, updateRenderWindow]);
+
+  useEffect(() => {
+    if (scalingRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      commitFrameRef.current = null;
+      if (scalingRef.current) return;
+      updateRenderWindow();
+    });
+    commitFrameRef.current = frame;
+    return () => {
+      if (commitFrameRef.current !== null) window.cancelAnimationFrame(commitFrameRef.current);
+      commitFrameRef.current = null;
+    };
+  }, [displayZoom, scalingRef, updateRenderWindow]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1552,9 +1901,12 @@ function OriginalPdfView({
           availableWidth={availableWidth}
           readerRef={readerRef}
           zoom={zoom}
-          displayZoom={displayZoom}
+          liveZoomRef={liveZoomRef}
           persistentAnchors={persistentAnchors}
           highlightRegions={highlightRegions}
+          pendingColor={pendingColor}
+          onJump={onJump}
+          onOpenUrl={onOpenUrl}
           shouldRender={
             page.page >= renderWindow.start && page.page <= renderWindow.end
           }
@@ -1572,6 +1924,148 @@ function initialReaderZoom() {
   } catch {
     return 1;
   }
+}
+
+function readerToolbarBottom(reader: HTMLElement): number | undefined {
+  const toolbar =
+    reader.closest<HTMLElement>(".reader-wrap")?.querySelector<HTMLElement>(".reader-toolbar") ??
+    reader.querySelector<HTMLElement>(".reader-toolbar");
+  return toolbar?.getBoundingClientRect().bottom;
+}
+
+function zoomAnchorForStack(
+  reader: HTMLElement,
+  stack: HTMLElement,
+  clientX: number,
+  clientY: number,
+  directStack: boolean,
+): PendingZoomAnchor | null {
+  const rect = stack.getBoundingClientRect();
+  const pageElement = stack.closest<HTMLElement>("[data-page]");
+  if (!rect.width || !rect.height || !pageElement) return null;
+  const toolbarBottom = readerToolbarBottom(reader);
+  const onToolbar = Boolean(!directStack && toolbarBottom !== undefined && clientY < toolbarBottom);
+  const anchorY = onToolbar && toolbarBottom !== undefined ? toolbarBottom : clientY;
+  return {
+    page: Number(pageElement.dataset.page) || 1,
+    shell: pageElement,
+    stack,
+    clientX,
+    clientY: anchorY,
+    xRatio: (clientX - rect.left) / rect.width,
+    yRatio: (anchorY - rect.top) / rect.height,
+  };
+}
+
+/**
+ * 解析 Ctrl/Cmd+滚轮缩放的锚点页与比例。xRatio/yRatio 不裁剪，光标位于页面间隙、
+ * 左右留白时仍锚定真实光标点。返回 null 仅当阅读器里没有任何页面。
+ */
+function resolveZoomAnchor(
+  reader: HTMLElement,
+  target: EventTarget | null,
+  clientX: number,
+  clientY: number,
+): PendingZoomAnchor | null {
+  const directStack =
+    target instanceof HTMLElement
+      ? target.closest<HTMLElement>(".original-page-stack") ??
+        target.closest<HTMLElement>(".original-page")?.querySelector<HTMLElement>(".original-page-stack") ??
+        undefined
+      : undefined;
+  const stack = directStack ?? nearestPageStack(reader, clientY);
+  if (!stack) return null;
+  return zoomAnchorForStack(reader, stack, clientX, clientY, Boolean(directStack));
+}
+
+function createZoomSession(
+  reader: HTMLElement,
+  anchor: PendingZoomAnchor | null,
+): ZoomSession | null {
+  if (!anchor) return null;
+  const containerWidth =
+    reader.querySelector<HTMLElement>(".original-pages")?.clientWidth ?? reader.clientWidth;
+  const pages: ZoomPageLayout[] = [];
+  for (const shell of reader.querySelectorAll<HTMLElement>("[data-page]")) {
+    const stack = shell.querySelector<HTMLElement>(".original-page-stack");
+    if (!stack) continue;
+    const datasetZoom = Number(stack.dataset.renderedZoom);
+    const renderedZoom = Number.isFinite(datasetZoom) && datasetZoom > 0 ? datasetZoom : 1;
+    pages.push({
+      shell,
+      stack,
+      baseWidth: stack.offsetWidth || 1,
+      baseHeight: stack.offsetHeight || 1,
+      renderedZoom,
+    });
+  }
+  return pages.length ? { anchor, pages, containerWidth } : null;
+}
+
+function applyZoomSession(session: ZoomSession, liveZoom: number) {
+  for (const page of session.pages) {
+    if (!page.shell.isConnected) continue;
+    const datasetZoom = Number(page.stack.dataset.renderedZoom);
+    if (Number.isFinite(datasetZoom) && datasetZoom > 0 && datasetZoom !== page.renderedZoom) {
+      page.renderedZoom = datasetZoom;
+      page.baseWidth = page.stack.offsetWidth || 1;
+      page.baseHeight = page.stack.offsetHeight || 1;
+    }
+    applyStackLiveZoom(
+      page.shell,
+      page.stack,
+      liveZoom / page.renderedZoom,
+      page.baseHeight,
+      page.baseWidth,
+      session.containerWidth,
+    );
+  }
+}
+
+function clearLiveZoomTransforms(reader: HTMLElement) {
+  for (const shell of reader.querySelectorAll<HTMLElement>("[data-page]")) {
+    const stack = shell.querySelector<HTMLElement>(".original-page-stack");
+    if (stack) applyStackLiveZoom(shell, stack, 1);
+  }
+}
+
+function shouldReuseZoomAnchor(
+  reader: HTMLElement,
+  anchor: PendingZoomAnchor,
+  clientX: number,
+  clientY: number,
+) {
+  const toolbarBottom = readerToolbarBottom(reader);
+  if (toolbarBottom !== undefined && clientY < toolbarBottom) return true;
+  const shellRect = anchor.shell.getBoundingClientRect();
+  const readerRect = reader.getBoundingClientRect();
+  const verticalPad = Math.max(80, Math.min(160, shellRect.height * 0.08));
+  const horizontalPad = Math.max(160, (readerRect.width - shellRect.width) / 2);
+  return (
+    clientX >= readerRect.left - 16 &&
+    clientX <= readerRect.right + 16 &&
+    clientY >= shellRect.top - verticalPad &&
+    clientY <= shellRect.bottom + verticalPad
+  );
+}
+
+/** 取与光标竖向距离最近的页面 stack（用于光标在页面间隙/左右留白上的锚定）。 */
+function nearestPageStack(reader: HTMLElement, clientY: number): HTMLElement | undefined {
+  let best: HTMLElement | undefined;
+  let bestDistance = Infinity;
+  for (const stack of reader.querySelectorAll<HTMLElement>(
+    "[data-page] .original-page-stack",
+  )) {
+    const rect = stack.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;
+    if (clientY >= rect.top && clientY <= rect.bottom) return stack;
+    const distance = clientY < rect.top ? rect.top - clientY : clientY - rect.bottom;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = stack;
+    }
+  }
+  return best;
 }
 
 function regionIdsAtPoint(
@@ -1608,7 +2102,10 @@ function popoverPosition() {
   const maxHeight = Math.min(560, viewportHeight - 16);
   const reader = document.querySelector<HTMLElement>(".reader-column");
   const rect = reader?.getBoundingClientRect();
-  const toolbar = reader?.querySelector<HTMLElement>(".reader-toolbar");
+  // 工具栏已移出滚动容器，改用全局查找。
+  const toolbar =
+    document.querySelector<HTMLElement>(".reader-toolbar") ??
+    reader?.querySelector<HTMLElement>(".reader-toolbar");
   const toolbarBottom = toolbar
     ? toolbar.getBoundingClientRect().bottom
     : rect
@@ -1631,12 +2128,14 @@ interface PdfReaderProps {
   conversations: Conversation[];
   activeConversationId?: string;
   onSelectConversation?: (conversation: Conversation) => void;
+  onDeleteConversation?: (conversation: Conversation) => void;
   outline: PaperSection[];
   requestedChapterPage?: ChapterScrollRequest;
   conversationFocusRequest?: ConversationFocusRequest;
+  pendingColor?: HighlightColor;
   onSelectAnchor: (anchor: TextAnchor, additive: boolean) => void;
   onClearSelection: () => void;
-  onActiveSectionChange: (sectionId?: string) => void;
+  onActiveChapterChange: (next: { sectionId?: string; page?: number }) => void;
   leftCollapsed?: boolean;
   rightCollapsed?: boolean;
   onRestoreLeft?: () => void;
@@ -1650,12 +2149,14 @@ export function PdfReader({
   conversations,
   activeConversationId,
   onSelectConversation,
+  onDeleteConversation,
   outline,
   requestedChapterPage,
   conversationFocusRequest,
+  pendingColor,
   onSelectAnchor,
   onClearSelection,
-  onActiveSectionChange,
+  onActiveChapterChange,
   leftCollapsed,
   rightCollapsed,
   onRestoreLeft,
@@ -1666,6 +2167,15 @@ export function PdfReader({
   const [pageNumber, setPageNumber] = useState(activeAnchors[0]?.page ?? 1);
   const [zoom, setZoom] = useState(initialReaderZoom);
   const [displayZoom, setDisplayZoom] = useState(initialReaderZoom);
+  const liveZoomRef = useRef(zoom);
+  const scalingRef = useRef(false);
+  const zoomFrameRef = useRef(0);
+  const wheelDeltaRef = useRef(0);
+  const zoomCommitTimerRef = useRef(0);
+  const zoomValueRef = useRef<HTMLButtonElement>(null);
+  const zoomOutButtonRef = useRef<HTMLButtonElement>(null);
+  const zoomInButtonRef = useRef<HTMLButtonElement>(null);
+  const resetZoomButtonRef = useRef<HTMLButtonElement>(null);
   const [panMode, setPanMode] = useState(false);
   const [panActive, setPanActive] = useState(false);
   const [hoveredRegionIds, setHoveredRegionIds] = useState<string[]>([]);
@@ -1673,7 +2183,15 @@ export function PdfReader({
   const [pinnedRegionIds, setPinnedRegionIds] = useState<string[]>([]);
   const [pinnedPoint, setPinnedPoint] = useState<{ x: number; y: number }>();
   const [pinFlashNonce, setPinFlashNonce] = useState(0);
-  const activeSectionRef = useRef<PaperSection | null>(null);
+  const activeChapterRef = useRef<{ sectionId?: string; page?: number } | null>(null);
+  const suppressSectionSyncRef = useRef(false);
+  const chapterScrollTimerRef = useRef(0);
+  const outlineRef = useRef(outline);
+  outlineRef.current = outline;
+  const paperRef = useRef(paper);
+  paperRef.current = paper;
+  const onActiveChapterChangeRef = useRef(onActiveChapterChange);
+  onActiveChapterChangeRef.current = onActiveChapterChange;
   const hoverRegionRef = useRef<string[]>([]);
   const pinnedRegionRef = useRef<string[]>([]);
   const pinHandledOnPointerUpRef = useRef(false);
@@ -1701,9 +2219,21 @@ export function PdfReader({
     moved: boolean;
     tapRegionIds: string[];
   } | null>(null);
-  const pendingZoomRef = useRef<PendingZoomAnchor | null>(null);
+  const pendingZoomRef = useRef<ZoomSession | null>(null);
 
   const activeAnchor = activeAnchors[0];
+
+  const syncZoomUi = useCallback((value: number) => {
+    const valueButton = zoomValueRef.current;
+    if (valueButton) {
+      valueButton.textContent = `${Math.round(value * 100)}%`;
+      valueButton.setAttribute("aria-label", `缩放 ${Math.round(value * 100)}%，点击重置`);
+      valueButton.title = "重置为 100%";
+    }
+    if (zoomOutButtonRef.current) zoomOutButtonRef.current.disabled = value <= MIN_READER_ZOOM;
+    if (zoomInButtonRef.current) zoomInButtonRef.current.disabled = value >= MAX_READER_ZOOM;
+    if (resetZoomButtonRef.current) resetZoomButtonRef.current.disabled = value === 1;
+  }, []);
 
   useEffect(() => {
     try {
@@ -1714,60 +2244,138 @@ export function PdfReader({
   }, [zoom]);
 
   useEffect(() => {
-    if (displayZoom === zoom) return;
-    const timer = window.setTimeout(() => setZoom(displayZoom), ZOOM_COMMIT_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [displayZoom, zoom]);
-
-  useLayoutEffect(() => {
-    const pending = pendingZoomRef.current;
-    if (!pending) return;
-    const reader = readerRef.current;
-    const stack = reader?.querySelector<HTMLElement>(
-      `[data-page="${pending.page}"] .original-page-stack`,
-    );
-    if (!reader || !stack) return;
-    const rect = stack.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    reader.scrollLeft += rect.left + pending.xRatio * rect.width - pending.clientX;
-    reader.scrollTop += rect.top + pending.yRatio * rect.height - pending.clientY;
-    pendingZoomRef.current = null;
-  }, [displayZoom]);
+    liveZoomRef.current = zoom;
+    syncZoomUi(zoom);
+  }, [syncZoomUi, zoom]);
 
   useEffect(() => {
     const reader = readerRef.current;
     if (!reader) return;
+    // 监听挂到 .reader-wrap（工具栏已移出滚动容器），保证光标在工具栏上时 Ctrl/Cmd+滚轮也被捕获，
+    // 不会触发浏览器整页缩放。
+    const host = reader.closest<HTMLElement>(".reader-wrap") ?? reader;
+
+    const scheduleCommit = () => {
+      if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
+      zoomCommitTimerRef.current = window.setTimeout(() => {
+        zoomCommitTimerRef.current = 0;
+        const session = pendingZoomRef.current;
+        if (!session) return;
+        pendingZoomRef.current = null;
+        scalingRef.current = false;
+        const next = liveZoomRef.current;
+        setDisplayZoom(next);
+        setZoom(next);
+      }, ZOOM_COMMIT_IDLE_MS);
+    };
+
     const onWheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
-      if (event.deltaY === 0) return;
+      const deltaPixels = normalizeReaderWheelDelta(
+        event.deltaY,
+        event.deltaMode,
+        window.innerHeight || reader.clientHeight || 800,
+      );
+      if (!deltaPixels) return;
       event.preventDefault();
-      const target = event.target;
-      const stack = target instanceof HTMLElement
-        ? target.closest<HTMLElement>(".original-page-stack") ??
-          target.closest<HTMLElement>(".original-page")?.querySelector<HTMLElement>(".original-page-stack") ??
-          undefined
-        : undefined;
-      if (stack) {
-        const rect = stack.getBoundingClientRect();
-        const pageElement = stack.closest<HTMLElement>("[data-page]");
-        if (rect.width && rect.height && pageElement) {
-          pendingZoomRef.current = {
-            page: Number(pageElement.dataset.page) || 1,
-            clientX: event.clientX,
-            clientY: event.clientY,
-            xRatio: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
-            yRatio: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
-          };
+
+      const session = pendingZoomRef.current;
+      const directPage =
+        event.target instanceof HTMLElement
+          ? event.target.closest<HTMLElement>("[data-page]")
+          : null;
+      const directStack = Boolean(
+        event.target instanceof HTMLElement &&
+          event.target.closest<HTMLElement>(".original-page-stack"),
+      );
+      const resolveSession = () =>
+        createZoomSession(
+          reader,
+          resolveZoomAnchor(reader, event.target, event.clientX, event.clientY),
+        );
+      const refreshAnchor = (
+        activeSession: ZoomSession,
+        anchor: PendingZoomAnchor,
+      ) => {
+        // 滚轮事件里光标通常不动：保留会话开始时的页面局部坐标作为锚点，滚动补偿
+        // 才能收敛到同一个内容点。只有光标实际移动或离开原页面时才重新解析，避免
+        // 每帧用已漂移的矩形重算比例，造成锚点持续累积偏移。
+        if (
+          Math.abs(event.clientX - anchor.clientX) < 3 &&
+          Math.abs(event.clientY - anchor.clientY) < 3
+        ) {
+          return;
         }
+        const refreshed = zoomAnchorForStack(
+          reader,
+          anchor.stack,
+          event.clientX,
+          event.clientY,
+          directStack,
+        );
+        if (refreshed) activeSession.anchor = refreshed;
+        else pendingZoomRef.current = resolveSession();
+      };
+
+      if (
+        session &&
+        directPage &&
+        session.anchor?.page === Number(directPage.dataset.page)
+      ) {
+        refreshAnchor(session, session.anchor);
+      } else if (
+        session &&
+        !directPage &&
+        session.anchor &&
+        shouldReuseZoomAnchor(reader, session.anchor, event.clientX, event.clientY)
+      ) {
+        refreshAnchor(session, session.anchor);
       } else {
-        pendingZoomRef.current = null;
+        pendingZoomRef.current = resolveSession();
       }
-      const direction: 1 | -1 = event.deltaY < 0 ? 1 : -1;
-      setDisplayZoom((current) => stepReaderZoom(current, direction));
+
+      if (!pendingZoomRef.current) return;
+      scalingRef.current = true;
+      wheelDeltaRef.current += deltaPixels;
+      // rAF 合并：一帧内多次滚轮只应用一次连续缩放，不触发 React 状态更新。
+      if (!zoomFrameRef.current) {
+        zoomFrameRef.current = window.requestAnimationFrame(() => {
+          zoomFrameRef.current = 0;
+          const activeSession = pendingZoomRef.current;
+          const delta = wheelDeltaRef.current;
+          wheelDeltaRef.current = 0;
+          if (!activeSession) return;
+          const next = continuousReaderZoom(liveZoomRef.current, delta);
+          if (next === liveZoomRef.current) {
+            pendingZoomRef.current = null;
+            scalingRef.current = false;
+            return;
+          }
+          liveZoomRef.current = next;
+          applyZoomSession(activeSession, next);
+          const anchor = activeSession.anchor;
+          if (anchor && anchor.stack.isConnected) {
+            const rect = anchor.stack.getBoundingClientRect();
+            if (rect.width && rect.height) {
+              reader.scrollLeft += rect.left + anchor.xRatio * rect.width - anchor.clientX;
+              reader.scrollTop += rect.top + anchor.yRatio * rect.height - anchor.clientY;
+            }
+          }
+          syncZoomUi(next);
+          scheduleCommit();
+        });
+      }
     };
-    reader.addEventListener("wheel", onWheel, { passive: false });
-    return () => reader.removeEventListener("wheel", onWheel);
-  }, [readerRef]);
+    host.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      if (zoomFrameRef.current) window.cancelAnimationFrame(zoomFrameRef.current);
+      zoomFrameRef.current = 0;
+      if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
+      zoomCommitTimerRef.current = 0;
+      wheelDeltaRef.current = 0;
+      host.removeEventListener("wheel", onWheel);
+    };
+  }, [readerRef, syncZoomUi]);
 
   useEffect(() => {
     if (!panMode) return;
@@ -1777,39 +2385,82 @@ export function PdfReader({
 
   useEffect(() => {
     setPageNumber(activeAnchor?.page ?? 1);
-    activeSectionRef.current = null;
-    onActiveSectionChange(undefined);
-  }, [activeAnchor?.page, onActiveSectionChange, paper.id]);
+    activeChapterRef.current = null;
+    onActiveChapterChangeRef.current({});
+  }, [activeAnchor?.page, paper.id]);
 
   useEffect(() => {
     if (!activeAnchor?.page) return;
-    const element = readerRef.current?.querySelector<HTMLElement>(`[data-page="${activeAnchor.page}"]`);
-    element?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const reader = readerRef.current;
+    const element = reader?.querySelector<HTMLElement>(`[data-page="${activeAnchor.page}"]`);
+    if (!reader || !element) return;
+    // 划选产生锚点时用户正停留在该页，此时 scrollIntoView(block:"start") 会把
+    // 视图拽回页首（顶部页甚至回到阅读器顶部），造成“划选后突然回滚”。
+    // 仅当目标页不在阅读器可视区内（例如从右侧问答列表跳转）时才滚动。
+    const readerRect = reader.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const margin = 72;
+    const isVisible =
+      elementRect.top < readerRect.bottom - margin &&
+      elementRect.bottom > readerRect.top + margin;
+    if (isVisible) return;
+    element.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [activeAnchor?.page, paper.id]);
 
   useEffect(() => {
     if (!requestedChapterPage) return;
-    const element = readerRef.current?.querySelector<HTMLElement>(
+    const reader = readerRef.current;
+    const section = outlineRef.current.find(
+      (entry) => entry.id === requestedChapterPage.sectionId,
+    );
+    const pageElement = reader?.querySelector<HTMLElement>(
       `[data-page="${requestedChapterPage.page}"]`,
     );
-    if (!element) return;
+    const stack = pageElement?.querySelector<HTMLElement>(".original-page-stack");
+    const pageData = paperRef.current.pages.find(
+      (page) => page.page === requestedChapterPage.page,
+    );
+    if (!reader || !pageElement || !stack) return;
+
     setPageNumber(requestedChapterPage.page);
-    element.scrollIntoView({ behavior: "smooth", block: "start" });
-    element.classList.remove("section-flash");
-    void element.offsetWidth;
-    element.classList.add("section-flash");
-    const onAnimationEnd = (event: AnimationEvent) => {
-      if (event.target === element && event.animationName === "section-flash") {
-        element.classList.remove("section-flash");
-      }
+    activeChapterRef.current = {
+      sectionId: section?.id,
+      page: requestedChapterPage.page,
     };
-    const removeFlash = () => element.classList.remove("section-flash");
-    element.addEventListener("animationend", onAnimationEnd);
-    const timer = window.setTimeout(removeFlash, 2100);
+    onActiveChapterChangeRef.current(activeChapterRef.current);
+    suppressSectionSyncRef.current = true;
+    const clearSuppress = () => {
+      suppressSectionSyncRef.current = false;
+    };
+    chapterScrollTimerRef.current = window.setTimeout(clearSuppress, 700);
+
+    const readerRect = reader.getBoundingClientRect();
+    const stackRect = stack.getBoundingClientRect();
+    const ratio =
+      pageData && section
+        ? sectionHeadingTopRatio(pageData, section.title) ?? 0
+        : 0;
+    const targetTop = stackRect.top + ratio * stackRect.height;
+    reader.scrollTo({
+      top: reader.scrollTop + (targetTop - readerRect.top - reader.clientHeight * 0.3),
+      behavior: "smooth",
+    });
+
+    const flash = document.createElement("div");
+    flash.className = "section-target-flash";
+    flash.style.top = `${ratio * 100}%`;
+    stack.append(flash);
+    const removeFlash = () => flash.remove();
+    const timer = window.setTimeout(removeFlash, 1400);
+    flash.addEventListener("animationend", removeFlash, { once: true });
+
     return () => {
+      window.clearTimeout(chapterScrollTimerRef.current);
+      chapterScrollTimerRef.current = 0;
+      suppressSectionSyncRef.current = false;
       window.clearTimeout(timer);
-      element.removeEventListener("animationend", onAnimationEnd);
-      element.classList.remove("section-flash");
+      flash.remove();
+      flash.removeEventListener("animationend", removeFlash);
     };
   }, [requestedChapterPage]);
 
@@ -1915,10 +2566,34 @@ export function PdfReader({
   }, []);
 
   function syncSection(page: number) {
-    const section = sectionForPage(outline, page);
-    if (section?.id === activeSectionRef.current?.id) return;
-    activeSectionRef.current = section ?? null;
-    onActiveSectionChange(section?.id);
+    if (suppressSectionSyncRef.current) return;
+    const reader = readerRef.current;
+    const fallbackSection = sectionForPage(outlineRef.current, page);
+    let bestSection = fallbackSection;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const section of outlineRef.current) {
+      if (section.page !== page) continue;
+      const sectionTop = reader
+        ? sectionStartTop(reader, paperRef.current, section)
+        : undefined;
+      if (sectionTop === undefined) continue;
+      const distance = Math.abs(
+        sectionTop - reader!.getBoundingClientRect().top - reader!.clientHeight * 0.3,
+      );
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestSection = section;
+      }
+    }
+    const next = { sectionId: bestSection?.id, page };
+    if (
+      next.sectionId === activeChapterRef.current?.sectionId &&
+      next.page === activeChapterRef.current?.page
+    ) {
+      return;
+    }
+    activeChapterRef.current = next;
+    onActiveChapterChangeRef.current(next);
   }
 
   function goToPage(page: number) {
@@ -1930,7 +2605,46 @@ export function PdfReader({
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function jumpToCitation(target: CitationTarget) {
+    const reader = readerRef.current;
+    if (!reader) return;
+    const pageData = paper.pages.find((entry) => entry.page === target.page);
+    const pageElement = reader.querySelector<HTMLElement>(`[data-page="${target.page}"]`);
+    const stack = pageElement?.querySelector<HTMLElement>(".original-page-stack");
+    if (!pageElement || !stack || !pageData?.height) return;
+    setPageNumber(target.page);
+    syncSection(target.page);
+    // 直接按目标纵坐标（scale=1 视口坐标，y 向下）计算滚动位置，避免
+    // 先 scrollIntoView 再微调造成的“先拽回页首再回落”抖动；目标页未渲染时
+    // stack 的布局尺寸仍为真实页面比例，计算依然有效。
+    const readerRect = reader.getBoundingClientRect();
+    const stackRect = stack.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, target.top / pageData.height!));
+    // stackRect.height 已包含缩放后的高度（getBoundingClientRect 计入 transform），
+    // 用它在缩放状态下也能定位到正确的目标位置。
+    const targetY = stackRect.top + ratio * stackRect.height;
+    reader.scrollTo({
+      top: reader.scrollTop + (targetY - readerRect.top - reader.clientHeight * 0.32),
+      behavior: "auto",
+    });
+    // 目标位置闪烁提示。
+    const flash = document.createElement("div");
+    flash.className = "citation-target-flash";
+    flash.style.top = `${ratio * 100}%`;
+    stack.append(flash);
+    const removeFlash = () => flash.remove();
+    window.setTimeout(removeFlash, 1400);
+    flash.addEventListener("animationend", removeFlash, { once: true });
+  }
+
+  function openExternalUrl(url: string) {
+    if (/^https?:\/\//i.test(url)) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
   function handleScroll(event?: React.UIEvent<HTMLElement>) {
+    if (scalingRef.current) return;
     if (event && event.target !== event.currentTarget) return;
     scrollSuppressUntilRef.current = performance.now() + 180;
     closeHoverHighlightPopover();
@@ -1955,8 +2669,16 @@ export function PdfReader({
 
   function changeZoom(nextZoom: number) {
     pendingZoomRef.current = null;
+    if (zoomFrameRef.current) window.cancelAnimationFrame(zoomFrameRef.current);
+    zoomFrameRef.current = 0;
+    wheelDeltaRef.current = 0;
+    if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
+    zoomCommitTimerRef.current = 0;
+    scalingRef.current = false;
     closeHighlightPopover();
     const clamped = clampReaderZoom(nextZoom);
+    liveZoomRef.current = clamped;
+    if (readerRef.current) clearLiveZoomTransforms(readerRef.current);
     setDisplayZoom(clamped);
     setZoom(clamped);
   }
@@ -2203,7 +2925,10 @@ export function PdfReader({
         selection.page,
         selected.quote,
         findQuoteStart(selection.page, selected.quote),
-        activeSectionRef.current?.title,
+        outlineRef.current.find(
+          (section) => section.id === activeChapterRef.current?.sectionId,
+        )?.title ??
+          sectionForPage(outlineRef.current, selection.page.page)?.title,
         {
           blockIds: selected.blockIds,
           textItemStart: selected.textItemStart,
@@ -2261,93 +2986,107 @@ export function PdfReader({
   }
 
   return (
-    <section
-      className={`reader-column ${panMode ? "pan-mode" : ""} ${panActive ? "is-dragging" : ""}`}
-      ref={readerRef}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerCancel}
-      onPointerLeave={handlePointerLeave}
-      onClick={handleReaderClick}
-      onScroll={handleScroll}
-      aria-label="论文阅读器"
-    >
+    <div className="reader-wrap">
       <div className="reader-toolbar">
-        <div className="reader-page-control">
-          <button aria-label="上一页" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
-            <ChevronLeft size={17} />
-          </button>
-          <span>第 {pageNumber} / {paper.pageCount} 页</span>
-          <button aria-label="下一页" disabled={pageNumber >= paper.pageCount} onClick={() => goToPage(pageNumber + 1)}>
-            <ChevronRight size={17} />
-          </button>
+        <div className="reader-toolbar-group">
+          <div className="reader-page-control">
+            <button aria-label="上一页" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
+              <ChevronLeft size={17} />
+            </button>
+            <span>第 {pageNumber} / {paper.pageCount} 页</span>
+            <button aria-label="下一页" disabled={pageNumber >= paper.pageCount} onClick={() => goToPage(pageNumber + 1)}>
+              <ChevronRight size={17} />
+            </button>
+          </div>
+          <div className="reader-zoom-control">
+            <button
+              type="button"
+              ref={zoomOutButtonRef}
+              aria-label="缩小"
+              title="缩小"
+              disabled={displayZoom <= 0.5}
+              onClick={() => changeZoom(stepReaderZoom(liveZoomRef.current, -1))}
+            >
+              <ZoomOut size={15} />
+            </button>
+            <button
+              type="button"
+              ref={zoomValueRef}
+              className="zoom-value"
+              aria-label={`缩放 ${Math.round(displayZoom * 100)}%，点击重置`}
+              title="重置为 100%"
+              onClick={() => changeZoom(1)}
+            >
+              {Math.round(displayZoom * 100)}%
+            </button>
+            <button
+              type="button"
+              ref={zoomInButtonRef}
+              aria-label="放大"
+              title="放大"
+              disabled={displayZoom >= 3}
+              onClick={() => changeZoom(stepReaderZoom(liveZoomRef.current, 1))}
+            >
+              <ZoomIn size={15} />
+            </button>
+            <button
+              type="button"
+              ref={resetZoomButtonRef}
+              aria-label="重置缩放"
+              title="重置为 100%"
+              disabled={displayZoom === 1}
+              onClick={() => changeZoom(1)}
+            >
+              <RotateCcw size={14} />
+            </button>
+            <button
+              type="button"
+              className={panMode ? "active" : ""}
+              aria-pressed={panMode}
+              aria-label={panMode ? "退出拖动模式" : "进入拖动模式"}
+              title={panMode ? "退出拖动模式" : "拖动模式"}
+              onClick={() => setPanMode((current) => !current)}
+            >
+              <Hand size={15} />
+            </button>
+          </div>
         </div>
-        <div className="reader-zoom-control">
-          <button
-            type="button"
-            aria-label="缩小"
-            title="缩小"
-            disabled={displayZoom <= 0.5}
-            onClick={() => changeZoom(stepReaderZoom(displayZoom, -1))}
-          >
-            <ZoomOut size={15} />
-          </button>
-          <button
-            type="button"
-            className="zoom-value"
-            aria-label={`缩放 ${Math.round(displayZoom * 100)}%，点击重置`}
-            title="重置为 100%"
-            onClick={() => changeZoom(1)}
-          >
-            {Math.round(displayZoom * 100)}%
-          </button>
-          <button
-            type="button"
-            aria-label="放大"
-            title="放大"
-            disabled={displayZoom >= 3}
-            onClick={() => changeZoom(stepReaderZoom(displayZoom, 1))}
-          >
-            <ZoomIn size={15} />
-          </button>
-          <button
-            type="button"
-            aria-label="重置缩放"
-            title="重置为 100%"
-            disabled={displayZoom === 1}
-            onClick={() => changeZoom(1)}
-          >
-            <RotateCcw size={14} />
-          </button>
-          <button
-            type="button"
-            className={panMode ? "active" : ""}
-            aria-pressed={panMode}
-            aria-label={panMode ? "退出拖动模式" : "进入拖动模式"}
-            title={panMode ? "退出拖动模式" : "拖动模式"}
-            onClick={() => setPanMode((current) => !current)}
-          >
-            <Hand size={15} />
-          </button>
-        </div>
-        <span className="selection-tip"><MousePointer2 size={14} /> 划选提问 · Ctrl/Cmd 追加</span>
-        <div className="reader-restore">
-          {leftCollapsed ? (
-            <button type="button" onClick={onRestoreLeft}><PanelLeftOpen size={14} /> 展开左侧</button>
-          ) : null}
-          {rightCollapsed ? (
-            <button type="button" onClick={onRestoreRight}><PanelRightOpen size={14} /> 展开右侧</button>
-          ) : null}
+        <div className="reader-toolbar-group reader-toolbar-right">
+          <span className="selection-tip"><MousePointer2 size={14} /> 划选提问 · Ctrl/Cmd 追加</span>
+          <div className="reader-restore">
+            {leftCollapsed ? (
+              <button type="button" onClick={onRestoreLeft}><PanelLeftOpen size={14} /> 展开左侧</button>
+            ) : null}
+            {rightCollapsed ? (
+              <button type="button" onClick={onRestoreRight}><PanelRightOpen size={14} /> 展开右侧</button>
+            ) : null}
+          </div>
         </div>
       </div>
+      <section
+        className={`reader-column ${panMode ? "pan-mode" : ""} ${panActive ? "is-dragging" : ""}`}
+        ref={readerRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onPointerLeave={handlePointerLeave}
+        onClick={handleReaderClick}
+        onScroll={handleScroll}
+        aria-label="论文阅读器"
+      >
       <OriginalPdfView
         paper={paper}
         readerRef={readerRef}
         zoom={zoom}
         displayZoom={displayZoom}
+        liveZoomRef={liveZoomRef}
+        scalingRef={scalingRef}
         persistentAnchors={activeAnchors}
         highlightRegions={highlightRegions}
+        pendingColor={pendingColor}
+        onJump={jumpToCitation}
+        onOpenUrl={openExternalUrl}
       />
       {pinnedRegionIds.length && pinnedPoint ? (
         <HighlightPopover
@@ -2358,6 +3097,7 @@ export function PdfReader({
           point={pinnedPoint}
           pinned
           onSelectConversation={onSelectConversation}
+          onDeleteConversation={onDeleteConversation}
         />
       ) : hoveredRegionIds.length && hoverPoint ? (
         <HighlightPopover
@@ -2367,9 +3107,11 @@ export function PdfReader({
           activeConversationId={activeConversationId}
           point={hoverPoint}
           onSelectConversation={onSelectConversation}
+          onDeleteConversation={onDeleteConversation}
         />
       ) : null}
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -2390,6 +3132,7 @@ interface HighlightPopoverProps {
   point: { x: number; y: number };
   pinned?: boolean;
   onSelectConversation?: (conversation: Conversation) => void;
+  onDeleteConversation?: (conversation: Conversation) => void;
 }
 
 function HighlightPopover({
@@ -2400,6 +3143,7 @@ function HighlightPopover({
   point,
   pinned = false,
   onSelectConversation,
+  onDeleteConversation,
 }: HighlightPopoverProps) {
   const matchedRegions = useMemo(
     () =>
@@ -2548,24 +3292,41 @@ function HighlightPopover({
                 ? [...new Set(item.turn.selection.anchors.map((entry) => entry.page))].join("/")
                 : conversation.anchor?.page ?? matchedRegions[0]?.anchor.page ?? "?";
               return (
-                <button
+                <div
                   key={item.turn.id}
-                  type="button"
                   className={`highlight-popover-index-item ${activeConversationId === conversation.id ? "active" : ""}`}
-                  onClick={() => onSelectConversation?.(conversation)}
                 >
-                  <span className={`highlight-color-dot highlight-color-dot-${color}`} aria-hidden="true" />
-                  <span className="highlight-popover-page">
-                    p.{page}
-                    {conversation.scope === "context" || item.turn.kind === "context" ? (
-                      <span className="index-badge">全文</span>
-                    ) : null}
-                  </span>
-                  <span className="highlight-popover-question">
-                    {formatAnchorExcerpt(item.turn.content, 36, 18)}
-                  </span>
-                  <time>{readableTime(item.turn.createdAt)}</time>
-                </button>
+                  <button
+                    type="button"
+                    className="highlight-popover-index-item-main"
+                    onClick={() => onSelectConversation?.(conversation)}
+                  >
+                    <span className={`highlight-color-dot highlight-color-dot-${color}`} aria-hidden="true" />
+                    <span className="highlight-popover-page">
+                      p.{page}
+                      {conversation.scope === "context" || item.turn.kind === "context" ? (
+                        <span className="index-badge">全文</span>
+                      ) : null}
+                    </span>
+                    <span className="highlight-popover-question">
+                      {formatAnchorExcerpt(item.turn.content, 36, 18)}
+                    </span>
+                    <time>{readableTime(item.turn.createdAt)}</time>
+                  </button>
+                  <button
+                    type="button"
+                    className="highlight-popover-index-item-delete"
+                    aria-label="删除这条问答记录"
+                    title="删除这条问答记录"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onDeleteConversation?.(conversation);
+                    }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
               );
             })}
           </div>

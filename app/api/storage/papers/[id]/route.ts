@@ -30,18 +30,26 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
-    const body = (await request.json()) as { note?: unknown };
-    if (typeof body.note !== "string") {
+    const body = (await request.json()) as { note?: unknown; pinned?: unknown };
+    if (body.pinned !== undefined && typeof body.pinned !== "boolean") {
+      return NextResponse.json(
+        { error: "置顶状态格式无效。" },
+        { status: 400, headers: noStore },
+      );
+    }
+    if (body.note !== undefined && typeof body.note !== "string") {
       return NextResponse.json(
         { error: "备注格式无效。" },
         { status: 400, headers: noStore },
       );
     }
-    getDefaultStorage().updatePaperNote(id, body.note);
+    const storage = getDefaultStorage();
+    if (body.note !== undefined) storage.updatePaperNote(id, body.note);
+    if (body.pinned !== undefined) storage.setPaperPinned(id, body.pinned);
     return NextResponse.json({ ok: true }, { headers: noStore });
   } catch {
     return NextResponse.json(
-      { error: "保存备注失败。" },
+      { error: "保存失败。" },
       { status: 500, headers: noStore },
     );
   }

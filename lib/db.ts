@@ -77,6 +77,20 @@ export async function updatePaperNote(id: string, note: string): Promise<void> {
   });
 }
 
+export async function setPaperPinned(id: string, pinned: boolean): Promise<void> {
+  await requestJson<{ ok: true }>(`/api/storage/papers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ pinned }),
+  });
+}
+
+export async function reorderPapers(ids: string[]): Promise<void> {
+  await requestJson<{ ok: true }>("/api/storage/papers/order", {
+    method: "PUT",
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export async function deletePaper(id: string): Promise<void> {
   await requestJson<{ ok: true }>(`/api/storage/papers/${encodeURIComponent(id)}`, {
     method: "DELETE",
@@ -93,12 +107,14 @@ export async function getWorkspace(paperId: string): Promise<PaperWorkspace> {
 export async function saveWorkspace(
   paperId: string,
   workspace: PaperWorkspace,
+  keepalive = false,
 ): Promise<void> {
   await requestJson<{ ok: true }>(
     `/api/storage/workspaces/${encodeURIComponent(paperId)}`,
     {
       method: "PUT",
       body: JSON.stringify(workspace),
+      ...(keepalive ? { keepalive: true } : {}),
     },
   );
 }

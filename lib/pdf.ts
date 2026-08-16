@@ -167,10 +167,77 @@ export function deriveHighlightRegions(
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+/**
+ * 判断论文页面是否带有可划选的文本项。存量数据（旧版本/中间版本导入）可能出现
+ * 所有页 textItems 为空但 originalReady 仍为 true 的情况，此时划选高亮不可用，
+ * 打开论文时需要据此触发重解析补齐。
+ */
+export function pagesHaveSelectableText(
+  pages: Array<Pick<ParsedPage, "textItems">> | undefined,
+): boolean {
+  return Boolean(
+    pages?.length &&
+      pages.every(
+        (page) =>
+          Array.isArray(page.textItems) &&
+          page.textItems.some(
+            (item) => typeof item.str === "string" && item.str.trim().length > 0,
+          ),
+      ),
+  );
+}
+
+export interface PageLinkStats {
+  /** 链接注解总数。 */
+  total: number;
+  /** 页内跳转链接数（引用/图表跳转到目标页）。 */
+  internal: number;
+  /** 外部 URL 链接数（打开新标签页）。 */
+  external: number;
+}
+
+/**
+ * 把链接矩形规范化为 [left, top, right, bottom]（left<=right、top<=bottom，
+ * 视口坐标，top 向下）。
+ *
+ * pdf.js 的 `viewport.convertToViewportRectangle()` 返回 [x1, y1, x2, y2]，
+ * 其中 y1 是视口坐标的“下边”、y2 是“上边”（PDF 坐标 y 轴向上被翻转），
+ * 直接按 [left, top, right, bottom] 使用会导致 top>bottom，链接区域被跳过。
+ * 该函数在解析（buildPageLinks）与渲染（renderPageLinks）两侧都调用，
+ * 以便同时修复存量数据中已存错的矩形。
+ */
+export function normalizeLinkRect(
+  rect: readonly [number, number, number, number] | number[],
+): [number, number, number, number] {
+  const [a, b, c, d] = rect as number[];
+  const left = Math.min(a, c);
+  const right = Math.max(a, c);
+  const top = Math.min(b, d);
+  const bottom = Math.max(b, d);
+  return [left, top, right, bottom];
+}
+
+/** 统计整篇论文的引用/图表链接，用于打开提示与阅读器工具栏角标。 */
+export function countPageLinks(
+  pages: Array<Pick<ParsedPage, "links">> | undefined,
+): PageLinkStats {
+  const stats: PageLinkStats = { total: 0, internal: 0, external: 0 };
+  for (const page of pages ?? []) {
+    for (const link of page.links ?? []) {
+      stats.total += 1;
+      if (link.targetPage !== undefined) stats.internal += 1;
+      else if (link.url) stats.external += 1;
+    }
+  }
+  return stats;
+}
+
 export const MAX_SELECTION_FRAGMENTS = 20;
 export const MIN_READER_ZOOM = 0.5;
 export const MAX_READER_ZOOM = 3;
 export const READER_ZOOM_STEP = 0.1;
+export const READER_ZOOM_WHEEL_SENSITIVITY = 0.0012;
+export const READER_ZOOM_WHEEL_LINE_HEIGHT = 16;
 
 export function clampReaderZoom(value: number): number {
   if (!Number.isFinite(value)) return 1;
@@ -180,6 +247,27 @@ export function clampReaderZoom(value: number): number {
 export function stepReaderZoom(value: number, direction: 1 | -1): number {
   const next = Math.round((clampReaderZoom(value) + direction * READER_ZOOM_STEP) * 10) / 10;
   return clampReaderZoom(next);
+}
+
+/** 将 WheelEvent 的 deltaY 按 deltaMode 归一化为像素，LINE 按固定行高、PAGE 按视口高度。 */
+export function normalizeReaderWheelDelta(
+  deltaY: number,
+  deltaMode: number,
+  viewportHeight = 800,
+): number {
+  const pixels =
+    deltaMode === 1
+      ? deltaY * READER_ZOOM_WHEEL_LINE_HEIGHT
+      : deltaMode === 2
+        ? deltaY * viewportHeight
+        : deltaY;
+  return Number.isFinite(pixels) ? pixels : 0;
+}
+
+/** 连续缩放：滚轮向上（负 deltaY）放大，向下缩小，并在 0.5-3 边界内钳制。 */
+export function continuousReaderZoom(value: number, deltaPixels: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(deltaPixels)) return clampReaderZoom(value);
+  return clampReaderZoom(value * Math.exp(-deltaPixels * READER_ZOOM_WHEEL_SENSITIVITY));
 }
 
 export interface PdfTextLine {
@@ -535,6 +623,44 @@ function sectionTitleKey(value: string): string {
   return stripSectionNumberPrefix(value)
     .replace(/[^a-z0-9\u4e00-\u9fff]/gi, "")
     .toLowerCase();
+}
+
+/** 章节标题匹配用归一化：去掉编号前缀、空白与标点，兼容大小写和中英文标题。 */
+export function normalizeSectionHeading(value: string): string {
+  return stripSectionNumberPrefix(value)
+    .replace(/[^a-z0-9\u4e00-\u9fff]/gi, "")
+    .toLowerCase();
+}
+
+/** 在当前页中查找与章节标题匹配的 heading 文本块。 */
+export function findSectionHeadingBlock(
+  page: ParsedPage,
+  title: string,
+): ParagraphBlock | undefined {
+  const target = normalizeSectionHeading(title);
+  if (!target) return undefined;
+  let exact: ParagraphBlock | undefined;
+  let prefix: ParagraphBlock | undefined;
+  for (const block of page.blocks) {
+    if (block.kind !== "heading") continue;
+    const candidate = normalizeSectionHeading(block.text);
+    if (!exact && candidate === target) exact = block;
+    if (!prefix && candidate.startsWith(target)) prefix = block;
+  }
+  return exact ?? prefix;
+}
+
+/** 返回标题在页面内的 top-down 纵向比例；旋转页或数据不足时返回 undefined。 */
+export function sectionHeadingTopRatio(
+  page: ParsedPage,
+  title: string,
+): number | undefined {
+  const block = findSectionHeadingBlock(page, title);
+  const height = page.height;
+  if (!block || !height) return undefined;
+  const rotation = page.rotation ?? 0;
+  if (rotation % 180 !== 0) return undefined;
+  return Math.min(1, Math.max(0, (height - block.top) / height));
 }
 
 function isKnownSectionTitle(value: string): boolean {

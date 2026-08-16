@@ -69,11 +69,29 @@ export interface FigureAsset {
   caption?: string;
 }
 
+export interface CitationTarget {
+  page: number;
+  top: number;
+}
+
+/** PDF 原生 Link 注解：矩形（视口坐标，缩放无关，相对页面左上角）+ 目标页/URL。 */
+export interface PdfLinkAnnotation {
+  /** 页面内矩形 [left, top, right, bottom]（PDF 单位，scale=1 视口坐标，top 向下）。 */
+  rect: [number, number, number, number];
+  /** 内部目标页码（1-based）；外部链接时为空。 */
+  targetPage?: number;
+  /** 目标在目标页内的纵向位置（scale=1 视口坐标，相对页面顶部，向下为正）；未知时为空。 */
+  targetTop?: number;
+  /** 外部 URL（http/https）；内部链接时为空。 */
+  url?: string;
+}
+
 export interface ParsedPage {
   page: number;
   text: string;
   blocks: ParagraphBlock[];
   figures: FigureAsset[];
+  links?: PdfLinkAnnotation[];
   width?: number;
   height?: number;
   rotation?: number;
@@ -90,6 +108,8 @@ export interface Paper {
   keywords?: string[];
   journal?: string;
   impactFactor?: string;
+  /** 论文库中是否置顶（置顶的论文始终排在本地论文库最前）。 */
+  pinned?: boolean;
   createdAt: string;
   updatedAt: string;
   pages: ParsedPage[];
@@ -107,6 +127,8 @@ export interface PaperMeta {
   keywords?: string[];
   journal?: string;
   impactFactor?: string;
+  /** 论文库中是否置顶。 */
+  pinned?: boolean;
   createdAt: string;
   updatedAt: string;
   pageCount: number;

@@ -5,10 +5,13 @@ import {
   buildFullPaperContext,
   buildPaperDigest,
   clampReaderZoom,
+  continuousReaderZoom,
+  countPageLinks,
   cssMatrixForTextItem,
   defaultHighlightColor,
   deduplicateSections,
   deriveHighlightRegions,
+  findSectionHeadingBlock,
   formatAnchorExcerpt,
   flattenPdfOutline,
   HIGHLIGHT_COLORS,
@@ -16,8 +19,13 @@ import {
   inferSectionsFromPages,
   latexizeText,
   makeAnchor,
+  normalizeLinkRect,
+  normalizeSectionHeading,
+  normalizeReaderWheelDelta,
+  pagesHaveSelectableText,
   paragraphBlocksFromLines,
   resolveOutlineDestinationPage,
+  sectionHeadingTopRatio,
   selectionGroupForAnchors,
   stepReaderZoom,
   textLinesFromItems,
@@ -796,6 +804,21 @@ describe("reader zoom", () => {
     expect(stepReaderZoom(0.5, -1)).toBe(0.5);
     expect(stepReaderZoom(3, 1)).toBe(3);
   });
+
+  it("normalizes wheel deltas from pixel, line, and page modes", () => {
+    expect(normalizeReaderWheelDelta(-120, 0)).toBe(-120);
+    expect(normalizeReaderWheelDelta(-3, 1)).toBe(-48);
+    expect(normalizeReaderWheelDelta(-1, 2, 900)).toBe(-900);
+    expect(normalizeReaderWheelDelta(Number.NaN, 0)).toBe(0);
+  });
+
+  it("applies continuous exponential zoom with bounds", () => {
+    expect(continuousReaderZoom(1, -120)).toBeCloseTo(Math.exp(0.144), 6);
+    expect(continuousReaderZoom(1, 120)).toBeCloseTo(Math.exp(-0.144), 6);
+    expect(continuousReaderZoom(0.5, 10_000)).toBe(0.5);
+    expect(continuousReaderZoom(3, -10_000)).toBe(3);
+    expect(continuousReaderZoom(Number.NaN, -120)).toBe(1);
+  });
 });
 
 describe("anchor metadata", () => {
@@ -1022,5 +1045,123 @@ describe("latexizeText", () => {
 
   it("wraps block equations in display math", () => {
     expect(latexizeText("α + β = γ", true)).toBe("$$\\alpha + \\beta = \\gamma$$");
+  });
+});
+
+describe("pagesHaveSelectableText", () => {
+  it("returns true when every page has non-empty text items", () => {
+    const pages = [
+      { textItems: [textItem("hello", 0, 0), textItem("world", 10, 0)] },
+      { textItems: [textItem(" ", 0, 0), textItem("second page", 10, 0)] },
+    ];
+    expect(pagesHaveSelectableText(pages)).toBe(true);
+  });
+
+  it("returns false for empty or missing pages", () => {
+    expect(pagesHaveSelectableText(undefined)).toBe(false);
+    expect(pagesHaveSelectableText([])).toBe(false);
+  });
+
+  it("returns false when a page lacks text items entirely", () => {
+    expect(pagesHaveSelectableText([{ textItems: [] }])).toBe(false);
+    expect(pagesHaveSelectableText([{ textItems: undefined }])).toBe(false);
+  });
+
+  it("returns false when every page has only whitespace items", () => {
+    expect(pagesHaveSelectableText([{ textItems: [textItem("   ", 0, 0)] }])).toBe(false);
+  });
+});
+
+describe("countPageLinks", () => {
+  it("counts internal, external and total links", () => {
+    const pages = [
+      {
+        links: [
+          { rect: [0, 0, 1, 1] as [number, number, number, number], targetPage: 3, targetTop: 40 },
+          { rect: [0, 0, 1, 1] as [number, number, number, number], url: "https://doi.org/x" },
+        ],
+      },
+      { links: [{ rect: [0, 0, 1, 1] as [number, number, number, number], targetPage: 5 }] },
+      { links: undefined },
+    ];
+    expect(countPageLinks(pages)).toEqual({ total: 3, internal: 2, external: 1 });
+  });
+
+  it("returns zeros for no links", () => {
+    expect(countPageLinks(undefined)).toEqual({ total: 0, internal: 0, external: 0 });
+    expect(countPageLinks([{ links: [] }])).toEqual({ total: 0, internal: 0, external: 0 });
+  });
+});
+
+describe("normalizeLinkRect", () => {
+  it("normalizes viewport rects with inverted y order (pdf.js flipped y axis)", () => {
+    // convertToViewportRectangle 返回 [x1, y1, x2, y2]，y1 是下边、y2 是上边。
+    expect(normalizeLinkRect([71.9, 260.76, 116.81, 253.36])).toEqual([
+      71.9, 253.36, 116.81, 260.76,
+    ]);
+  });
+
+  it("keeps already-ordered rects unchanged", () => {
+    expect(normalizeLinkRect([10, 20, 30, 40])).toEqual([10, 20, 30, 40]);
+  });
+
+  it("orders left/right as well as top/bottom independently", () => {
+    expect(normalizeLinkRect([30, 40, 10, 20])).toEqual([10, 20, 30, 40]);
+    expect(normalizeLinkRect([30, 20, 10, 40])).toEqual([10, 20, 30, 40]);
+  });
+});
+
+describe("section heading positioning helpers", () => {
+  const page: ParsedPage = {
+    page: 1,
+    text: "Introduction\nMethod",
+    figures: [],
+    height: 800,
+    rotation: 0,
+    blocks: [
+      {
+        id: "h1",
+        page: 1,
+        index: 0,
+        text: "Introduction",
+        start: 0,
+        end: 12,
+        top: 720,
+        kind: "heading",
+      },
+      {
+        id: "h2",
+        page: 1,
+        index: 1,
+        text: "Method",
+        start: 13,
+        end: 19,
+        top: 520,
+        kind: "heading",
+      },
+    ],
+  };
+
+  it("finds each heading on the same page by its own title", () => {
+    expect(findSectionHeadingBlock(page, "Introduction")?.id).toBe("h1");
+    expect(findSectionHeadingBlock(page, "Method")?.id).toBe("h2");
+  });
+
+  it("matches numbered outline titles to unnumbered heading blocks", () => {
+    expect(normalizeSectionHeading("1. Introduction")).toBe("introduction");
+    expect(findSectionHeadingBlock(page, "1. Introduction")?.text).toBe("Introduction");
+    expect(findSectionHeadingBlock(page, "III. Method")?.text).toBe("Method");
+  });
+
+  it("returns a top-down ratio for upright and 180-degree pages", () => {
+    expect(sectionHeadingTopRatio(page, "Introduction")).toBeCloseTo(0.1);
+    expect(sectionHeadingTopRatio(page, "Method")).toBeCloseTo(0.35);
+    expect(sectionHeadingTopRatio({ ...page, rotation: 180 }, "Introduction")).toBeCloseTo(0.1);
+  });
+
+  it("returns undefined for rotated pages or missing headings", () => {
+    expect(sectionHeadingTopRatio({ ...page, rotation: 90 }, "Introduction")).toBeUndefined();
+    expect(sectionHeadingTopRatio({ ...page, rotation: 270 }, "Method")).toBeUndefined();
+    expect(sectionHeadingTopRatio(page, "Missing")).toBeUndefined();
   });
 });

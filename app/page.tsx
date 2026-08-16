@@ -32,6 +32,7 @@ import {
   Palette,
   PanelLeftClose,
   PanelRightClose,
+  Pin,
   Plus,
   Quote,
   RefreshCw,
@@ -67,9 +68,11 @@ import {
   importBackup,
   listPapers,
   lookupPaperMetadata,
+  reorderPapers,
   saveSettings,
   savePaper,
   saveWorkspace,
+  setPaperPinned,
   updatePaperNote,
 } from "@/lib/db";
 import { buildBackup, isBackup, type BackupSettings } from "@/lib/backup";
@@ -87,6 +90,7 @@ import {
   deriveHighlightRegions,
   HIGHLIGHT_COLORS,
   MAX_SELECTION_FRAGMENTS,
+  pagesHaveSelectableText,
   selectionGroupForAnchors,
 } from "@/lib/pdf";
 import { markdownToMindMap, mindMapToSvg } from "@/lib/mindmap";
@@ -139,7 +143,7 @@ const blankWorkspace: PaperWorkspace = { annotations: [], conversations: [], art
 const artifactDetails: Record<ArtifactKind, { title: string; description: string; icon: typeof FileText }> = {
   notes: { title: "阅读笔记", description: "提炼问题、贡献、方法、证据与启发", icon: FileText },
   mindmap: { title: "论文脑图", description: "用可折叠的论证结构理解全篇", icon: Network },
-  writing: { title: "写作思路", description: "拆解论证、结构和表达策略", icon: WandSparkles },
+  writing: { title: "写作思路", description: "以本文为样本，学习作者的写作方法与技巧", icon: WandSparkles },
 };
 
 const promptLabels: Record<PromptKind, string> = {
@@ -151,6 +155,31 @@ const promptLabels: Record<PromptKind, string> = {
 
 function uid() {
   return typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+}
+
+// GLM 免费档对同一账号并发有限，采用全局单任务：一次只允许一个问答/生成任务，
+// 执行期间其他提交按钮禁用；DeepSeek 无并发限制，保持原有并行逻辑。
+
+// 对可重试的上游错误（限流/超时/5xx）做带退避的自动重试，避免瞬时限流直接报失败。
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  retries = 3,
+): Promise<Response> {
+  let lastResponse: Response | undefined;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const response = await fetch(url, init);
+    const retryable =
+      response.status === 408 ||
+      response.status === 429 ||
+      response.status >= 500;
+    if (!retryable) return response;
+    lastResponse = response;
+    if (attempt < retries - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)));
+    }
+  }
+  return lastResponse ?? new Response(null, { status: 502 });
 }
 
 function readableDate(value: string) {
@@ -178,6 +207,7 @@ function paperToMeta(paper: Paper): PaperMeta {
     keywords: paper.keywords,
     journal: paper.journal,
     impactFactor: paper.impactFactor,
+    pinned: paper.pinned,
     createdAt: paper.createdAt,
     updatedAt: paper.updatedAt,
     pageCount: paper.pageCount,
@@ -313,11 +343,13 @@ function documentContext(paper: Paper) {
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   const [papers, setPapers] = useState<PaperMeta[]>([]);
   const [paper, setPaper] = useState<Paper>();
-  const [activeSectionId, setActiveSectionId] = useState<string>();
+  const [activeChapter, setActiveChapter] = useState<{ sectionId?: string; page?: number }>({});
   const [chapterScrollRequest, setChapterScrollRequest] = useState<{
     page: number;
+    sectionId: string;
     nonce: number;
   }>();
   const [workspace, setWorkspace] = useState<PaperWorkspace>(blankWorkspace);
@@ -332,13 +364,20 @@ export default function Home() {
   const [mode, setMode] = useState<ModelMode>("fast");
   const [modelProvider, setModelProvider] = useState<ModelProvider>("deepseek");
   const [question, setQuestion] = useState("");
-  const [generating, setGenerating] = useState(false);
+  const [runningKinds, setRunningKinds] = useState<Set<string>>(new Set());
+  const [noticeKinds, setNoticeKinds] = useState<Set<string>>(new Set());
+  const runningKindsRef = useRef<Set<string>>(new Set());
+  const rightViewRef = useRef<RightView>("chat");
+  rightViewRef.current = rightView;
+  const taskPaperRef = useRef<Record<string, string>>({});
   const [contextMode, setContextMode] = useState(false);
   const [pendingColor, setPendingColor] = useState<HighlightColor>(HIGHLIGHT_COLORS[0]);
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
   const [backfillingId, setBackfillingId] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [libraryQuery, setLibraryQuery] = useState("");
+  const [dragPaperId, setDragPaperId] = useState<string>();
+  const [dragOverId, setDragOverId] = useState<string>();
   const [editingNotePaperId, setEditingNotePaperId] = useState<string>();
   const [noteDraft, setNoteDraft] = useState("");
   const [activeConversationId, setActiveConversationId] = useState<string>();
@@ -360,8 +399,14 @@ export default function Home() {
   const pendingWorkspaceRef = useRef<PaperWorkspace | null>(null);
   const workspaceRef = useRef<PaperWorkspace>(blankWorkspace);
   workspaceRef.current = workspace;
+  const runningConversationIdRef = useRef<string | undefined>(undefined);
+  const deletedConversationIdsRef = useRef<Set<string>>(new Set());
   const paperIdRef = useRef<string | undefined>(paper?.id);
   paperIdRef.current = paper?.id;
+
+  useEffect(() => {
+    setNoticeKinds(new Set());
+  }, [paper?.id]);
   const saveWorkspaceDebouncer = useMemo(
     () =>
       debounce(() => {
@@ -373,6 +418,23 @@ export default function Home() {
       }, 300),
     [],
   );
+
+  // 关闭/切换页面时兜底保存：提问、标注等成果是防抖（300ms）落盘，
+  // 在防抖窗口内直接关闭页面可能丢失最后一次写入，这里用 keepalive 尽力补写。
+  useEffect(() => {
+    const flushOnExit = () => {
+      const id = paperIdRef.current;
+      const next = pendingWorkspaceRef.current;
+      if (!id || !next) return;
+      void saveWorkspace(id, next, true).catch(() => {});
+    };
+    window.addEventListener("pagehide", flushOnExit);
+    window.addEventListener("beforeunload", flushOnExit);
+    return () => {
+      window.removeEventListener("pagehide", flushOnExit);
+      window.removeEventListener("beforeunload", flushOnExit);
+    };
+  }, []);
   const activeAnchor = activeAnchors[0];
   const activeSelection = useMemo(
     () => selectionGroupForAnchors(paper?.id ?? "", activeAnchors),
@@ -630,9 +692,12 @@ export default function Home() {
     [saveWorkspaceDebouncer],
   );
 
-  const onActiveSectionChange = useCallback((sectionId?: string) => {
-    setActiveSectionId(sectionId);
-  }, []);
+  const onActiveChapterChange = useCallback(
+    (next: { sectionId?: string; page?: number }) => {
+      setActiveChapter(next);
+    },
+    [],
+  );
 
   const selectedConversation = useMemo(() => {
     const byId = workspace.conversations.find((conversation) => conversation.id === activeConversationId);
@@ -671,26 +736,55 @@ export default function Home() {
     const startX = event.clientX;
     const startLeft = leftWidth;
     const startRight = rightWidth;
+    // 拖动期间直接改 grid 的样式（CSS 变量驱动网格列宽与拖拽手柄位置），
+    // 不触发 React 渲染，避免阅读器逐帧重排与逐帧重绘 PDF；松手时一次性提交。
+    // 同时通过 body 类标记“正在调整布局”，阅读器在此期间冻结页面宽度，
+    // 防止中间内容随拖拽逐帧重排导致滚动跳动。
+    document.body.classList.add("papermate-resizing");
+    let currentLeft = startLeft;
+    let currentRight = startRight;
+    const applyWidths = (left: number, right: number) => {
+      currentLeft = left;
+      currentRight = right;
+      const grid = gridRef.current;
+      if (!grid) return;
+      grid.style.gridTemplateColumns = `${Math.round(left)}px minmax(0, 1fr) ${Math.round(right)}px`;
+      grid.style.setProperty("--left-panel-width", `${Math.round(left)}px`);
+      grid.style.setProperty("--right-panel-width", `${Math.round(right)}px`);
+    };
     const onMove = (moveEvent: PointerEvent) => {
       const delta = moveEvent.clientX - startX;
       if (which === "left") {
-        const maxLeft = Math.min(420, Math.max(170, window.innerWidth - rightWidth - 380 - 28));
-        setLeftWidth(Math.min(maxLeft, Math.max(170, startLeft + delta)));
+        const maxLeft = Math.min(420, Math.max(170, window.innerWidth - startRight - 380 - 28));
+        applyWidths(Math.min(maxLeft, Math.max(170, startLeft + delta)), startRight);
       } else {
-        const maxRight = Math.min(620, Math.max(300, window.innerWidth - leftWidth - 380 - 28));
-        setRightWidth(Math.min(maxRight, Math.max(300, startRight - delta)));
+        const maxRight = Math.min(620, Math.max(300, window.innerWidth - startLeft - 380 - 28));
+        applyWidths(startLeft, Math.min(maxRight, Math.max(300, startRight - delta)));
       }
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      document.body.classList.remove("papermate-resizing");
+      // 通知阅读器拖动结束，立即按最终宽度重新适配页面。
+      window.dispatchEvent(new Event("papermate-resize-settled"));
+      // 一次提交拖拽结果，布局持久化 effect 只触发一次。
+      if (which === "left") {
+        const maxLeft = Math.min(420, Math.max(170, window.innerWidth - currentRight - 380 - 28));
+        setLeftWidth(Math.min(maxLeft, Math.max(170, currentLeft)));
+      } else {
+        const maxRight = Math.min(620, Math.max(300, window.innerWidth - currentLeft - 380 - 28));
+        setRightWidth(Math.min(maxRight, Math.max(300, currentRight)));
+      }
     };
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
   async function handleFile(file?: File) {
@@ -710,8 +804,21 @@ export default function Home() {
           const others = current.filter((item) => item.id !== existing.id);
           return [paperToMeta(existing), ...others];
         });
-        setPaper(existing);
-        setNotice(`《${existing.title}》已经在本机论文库中，已直接打开。`);
+        // 存量数据可能缺少文本项（中间版本导入），直接打开会导致划选高亮不可用，
+        // 这里先补齐再打开。
+        let opened = existing;
+        if (!pagesHaveSelectableText(existing.pages)) {
+          opened = await repairPaperOriginalMetadata(existing);
+          if (opened.originalReady) {
+            await savePaper(opened);
+            setPapers((current) => {
+              const others = current.filter((item) => item.id !== opened.id);
+              return [paperToMeta(opened), ...others];
+            });
+          }
+        }
+        setPaper(opened);
+        setNotice(`《${opened.title}》已经在本机论文库中，已直接打开。`);
         setUploadState("idle");
         return;
       }
@@ -783,48 +890,89 @@ export default function Home() {
     const titleIsFileName =
       full.title === fileNameBase || full.title === full.fileName;
     const titleNeedsLookup = titleIsFileName || isWeakPaperTitle(full.title);
-    const hasMetadata = Boolean(
-      full.keywords?.length || full.journal || full.impactFactor,
+    // 缺少影响因子时，每次打开都会在后台重试补齐（成功一次后即持久化，
+    // 之后不再发起请求），OpenAlex 限流恢复后影响因子会自动出现。
+    const needsMetaLookup =
+      titleNeedsLookup || !full.impactFactor;
+    // 旧版本数据没有 links 字段（所有页都缺失）或内部链接缺少目标坐标时需要重新解析补齐；
+    // 若已有完整 links（即使某页恰好无链接）则不重复解析。
+    const hasStaleLinks = full.pages.some((page) =>
+      page.links?.some((link) => link.targetPage !== undefined && link.targetTop === undefined),
     );
-    if (!hasMetadata || titleNeedsLookup || !full.originalReady) {
+    const needsLinkRepair =
+      full.pages.length > 0 &&
+      (full.pages.every((page) => page.links === undefined) || hasStaleLinks);
+    // 存量数据可能缺失文本项（中间版本导入/旧版本），划选高亮依赖 textItems，
+    // 缺失时同样需要重解析补齐。
+    const needsTextRepair = !pagesHaveSelectableText(full.pages);
+    const needsRepair = needsLinkRepair || needsTextRepair;
+    const repairing = !full.originalReady || needsRepair;
+    if (needsMetaLookup || repairing) {
       setBackfillingId(item.id);
       setNotice("正在补齐这篇论文的元数据和排版数据…");
     }
     try {
-      const [metadata, repaired] = await Promise.all([
-        !hasMetadata || titleNeedsLookup
-          ? (() => {
-              const firstPageBlocks = firstPageMetadataBlocks(full.pages);
-              return lookupPaperMetadata({
-                title: full.title,
-                text: full.pages
-                  .slice(0, 3)
-                  .map((page) => page.text)
-                  .join("\n"),
-                blocks: firstPageBlocks.blocks,
-                pageHeight: firstPageBlocks.pageHeight,
-              }).catch(() => ({} as PaperMetadataPatch));
-            })()
-          : Promise.resolve({} as PaperMetadataPatch),
-        full.originalReady
-          ? Promise.resolve(full)
-          : repairPaperOriginalMetadata(full),
-      ]);
+      // 排版数据（links/textItems）缺失时先同步修复，保证打开后划选、跳转可用；
+      // 元数据补齐放后台，不阻塞阅读。
+      let opened = full;
+      if (repairing) {
+        opened = await repairPaperOriginalMetadata(full);
+        if (opened.originalReady) {
+          setPapers((current) =>
+            current.map((entry) =>
+              entry.id === opened.id ? paperToMeta(opened) : entry,
+            ),
+          );
+          await savePaper(opened);
+        }
+      }
+      setPaper(opened);
+      if (!opened.originalReady) {
+        setNotice("未读取到文本层，仍会显示原版页面。");
+      } else if (repairing && !needsMetaLookup) {
+        setNotice("已补齐这篇论文的排版数据。");
+      }
+      if (needsMetaLookup) {
+        void enrichPaperMetadata(opened, titleNeedsLookup);
+      } else {
+        setBackfillingId(undefined);
+      }
+    } catch (error) {
+      setBackfillingId(undefined);
+      setNotice(error instanceof Error ? error.message : "补齐论文信息失败，请稍后重试。");
+    }
+  }
+
+  async function enrichPaperMetadata(paper: Paper, titleNeedsLookup: boolean) {
+    try {
+      const firstPageBlocks = firstPageMetadataBlocks(paper.pages);
+      const metadata = await lookupPaperMetadata({
+        title: paper.title,
+        text: paper.pages
+          .slice(0, 3)
+          .map((page) => page.text)
+          .join("\n"),
+        blocks: firstPageBlocks.blocks,
+        pageHeight: firstPageBlocks.pageHeight,
+      }).catch(() => ({} as PaperMetadataPatch));
       const nextTitle = titleNeedsLookup
-        ? metadata.title?.trim() || full.title
-        : full.title;
+        ? metadata.title?.trim() || paper.title
+        : paper.title;
       const enriched: Paper = {
-        ...repaired,
+        ...paper,
         title: nextTitle,
-        keywords: metadata.keywords?.length ? metadata.keywords : repaired.keywords,
-        journal: metadata.journal || repaired.journal,
-        impactFactor: metadata.impactFactor || repaired.impactFactor,
+        keywords: metadata.keywords?.length ? metadata.keywords : paper.keywords,
+        journal: metadata.journal || paper.journal,
+        impactFactor: metadata.impactFactor || paper.impactFactor,
       };
       const changed =
-        nextTitle !== full.title ||
-        !full.originalReady ||
-        Boolean(metadata.keywords?.length || metadata.journal || metadata.impactFactor);
-      setPaper(enriched);
+        nextTitle !== paper.title ||
+        Boolean(
+          metadata.keywords?.length ||
+            metadata.journal ||
+            metadata.impactFactor,
+        );
+      setPaper((current) => (current?.id === enriched.id ? enriched : current));
       if (changed) {
         setPapers((items) =>
           items.map((entry) =>
@@ -832,12 +980,8 @@ export default function Home() {
           ),
         );
         await savePaper(enriched);
+        setNotice("已补齐这篇论文的元数据。");
       }
-      if (!enriched.originalReady) {
-        setNotice("未读取到文本层，仍会显示原版页面。");
-        return;
-      }
-      if (changed) setNotice("已补齐这篇论文的元数据。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "补齐论文信息失败，请稍后重试。");
     } finally {
@@ -866,7 +1010,7 @@ export default function Home() {
       );
     setActiveConversationId(existing?.id);
     setPendingColor(defaultHighlightColor(workspace.conversations.length));
-    setRightView("chat");
+    openView("chat");
     if (additive && nextAnchors.length === MAX_SELECTION_FRAGMENTS) {
       setNotice(`一次最多组合 ${MAX_SELECTION_FRAGMENTS} 个片段。`);
     }
@@ -875,6 +1019,32 @@ export default function Home() {
   function clearActiveSelection() {
     setActiveAnchors([]);
     setActiveConversationId(undefined);
+  }
+
+  function openView(view: RightView) {
+    setRightView(view);
+    setNoticeKinds((prev) => {
+      const next = new Set(prev);
+      next.delete(view);
+      return next;
+    });
+  }
+
+  function startKind(key: string, paperId: string) {
+    taskPaperRef.current[key] = paperId;
+    const next = new Set(runningKindsRef.current).add(key);
+    runningKindsRef.current = next;
+    setRunningKinds(next);
+  }
+
+  function finishKind(key: string, currentPaperId?: string) {
+    const next = new Set(runningKindsRef.current);
+    next.delete(key);
+    runningKindsRef.current = next;
+    setRunningKinds(next);
+    if (rightViewRef.current !== key && taskPaperRef.current[key] === currentPaperId) {
+      setNoticeKinds((prev) => new Set(prev).add(key));
+    }
   }
 
   function selectConversation(conversation: Conversation) {
@@ -895,22 +1065,42 @@ export default function Home() {
           : [],
       nonce: (current?.nonce ?? 0) + 1,
     }));
-    setRightView("chat");
+    openView("chat");
   }
 
   function updateConversation(conversation: Conversation) {
-    const exists = workspace.conversations.some((item) => item.id === conversation.id);
+    const base = workspaceRef.current;
+    const exists = base.conversations.some((item) => item.id === conversation.id);
+    if (!exists && deletedConversationIdsRef.current.has(conversation.id)) return;
     const next = {
-      ...workspace,
+      ...base,
       conversations: exists
-        ? workspace.conversations.map((item) => (item.id === conversation.id ? conversation : item))
-        : [conversation, ...workspace.conversations],
+        ? base.conversations.map((item) => (item.id === conversation.id ? conversation : item))
+        : [conversation, ...base.conversations],
     };
     commitWorkspace(next);
   }
 
   function changeConversationColor(conversation: Conversation, color: HighlightColor) {
     updateConversation({ ...conversation, color, updatedAt: new Date().toISOString() });
+  }
+
+  function deleteConversation(target: Conversation) {
+    if (runningConversationIdRef.current === target.id) {
+      setNotice("这条问答正在生成回复，请稍后再删除。");
+      return;
+    }
+    const base = workspaceRef.current;
+    const remaining = base.conversations.filter((item) => item.id !== target.id);
+    if (remaining.length === base.conversations.length) return;
+    deletedConversationIdsRef.current.add(target.id);
+    if (activeConversationId === target.id || selectedConversation?.id === target.id) {
+      setActiveConversationId(undefined);
+      setActiveAnchors([]);
+      setConversationFocusRequest(undefined);
+    }
+    commitWorkspace({ ...base, conversations: remaining });
+    setNotice("已删除这条问答记录，对应对话内容和高亮已同步移除。");
   }
 
   async function streamResponse(
@@ -921,37 +1111,46 @@ export default function Home() {
     onText: (content: string) => void,
   ) {
     const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: modelProvider,
-        apiKey: activeApiKey,
-        mode,
-        task,
-        context,
-        question: taskQuestion,
-        messages: history.slice(-10).map((message) => ({ role: message.role, content: message.content })),
-      }),
-    });
-    if (!response.ok || !response.body) {
-      const data = (await response.json().catch(() => ({}))) as { error?: string };
-      throw new Error(data.error ?? "无法获得模型回复。" );
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let content = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      content += decoder.decode(value, { stream: true });
-      onText(content);
-    }
-    return content;
+    const run = async () => {
+      const response = await fetchWithRetry("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: modelProvider,
+          apiKey: activeApiKey,
+          mode,
+          task,
+          context,
+          question: taskQuestion,
+          messages: history.slice(-10).map((message) => ({ role: message.role, content: message.content })),
+        }),
+      });
+      if (!response.ok || !response.body) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? "无法获得模型回复。" );
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let content = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        content += decoder.decode(value, { stream: true });
+        onText(content);
+      }
+      return content;
+    };
+    // GLM 的单任务限制由调用方在 startKind 前统一拦截；这里所有 provider 都直接运行。
+    return run();
   }
 
   async function sendQuestion(kind: PromptKind, forcedQuestion?: string) {
-    if (!paper || generating) return;
+    if (!paper) return;
+    if (modelProvider === "glm" && runningKindsRef.current.size > 0) {
+      setNotice("GLM 正在处理上一个任务，请稍候。");
+      return;
+    }
+    if (runningKinds.has("chat")) return;
     const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
     const providerLabel = modelProvider === "glm" ? "智谱 GLM" : "DeepSeek";
     if (!activeApiKey.trim()) {
@@ -971,16 +1170,17 @@ export default function Home() {
     }
     const now = new Date().toISOString();
     const isContextRequest = kind === "context";
-    const activeById = workspace.conversations.find((conversation) => conversation.id === activeConversationId);
+    const baseConversations = workspaceRef.current.conversations;
+    const activeById = baseConversations.find((conversation) => conversation.id === activeConversationId);
     const baseConversation = isContextRequest
-      ? workspace.conversations.find(
+      ? baseConversations.find(
           (conversation) =>
             conversation.scope === "context" &&
             conversationMatchesSelection(conversation, activeSelection, activeAnchor),
         )
       : activeById && isNormalScope(activeById)
         ? activeById
-        : workspace.conversations.find(
+        : baseConversations.find(
             (conversation) =>
               isNormalScope(conversation) &&
               conversationMatchesSelection(conversation, activeSelection, activeAnchor),
@@ -991,7 +1191,7 @@ export default function Home() {
       anchor: activeAnchor,
       selection: activeSelection,
       scope: isContextRequest ? "context" : "normal",
-      color: pendingColor ?? defaultHighlightColor(workspace.conversations.length),
+      color: pendingColor ?? defaultHighlightColor(baseConversations.length),
       title: isContextRequest
         ? activeSelection
           ? activeSelection.anchors.length > 1
@@ -1035,11 +1235,12 @@ export default function Home() {
       turns: [...conversation.turns, userTurn, assistantTurn],
       updatedAt: now,
     };
+    runningConversationIdRef.current = currentConversation.id;
     updateConversation(currentConversation);
     setActiveConversationId(currentConversation.id);
-    setPendingColor(defaultHighlightColor(workspace.conversations.length + 1));
+    setPendingColor(defaultHighlightColor(baseConversations.length + 1));
     setQuestion("");
-    setGenerating(true);
+    startKind("chat", paper.id);
     const selectedContext = buildContext(paper.pages, activeAnchors);
     let historyMessages: Array<{ role: "user" | "assistant"; content: string }>;
     let requestContext: string;
@@ -1081,12 +1282,20 @@ export default function Home() {
       };
       updateConversation(currentConversation);
     } finally {
-      setGenerating(false);
+      if (runningConversationIdRef.current === currentConversation.id) {
+        runningConversationIdRef.current = undefined;
+      }
+      finishKind("chat", paper?.id);
     }
   }
 
   async function generateArtifact(kind: ArtifactKind) {
-    if (!paper || generating) return;
+    if (!paper) return;
+    if (modelProvider === "glm" && runningKindsRef.current.size > 0) {
+      setNotice("GLM 正在处理上一个任务，请稍候。");
+      return;
+    }
+    if (runningKinds.has(kind)) return;
     const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
     const providerLabel = modelProvider === "glm" ? "智谱 GLM" : "DeepSeek";
     if (!activeApiKey.trim()) {
@@ -1094,7 +1303,7 @@ export default function Home() {
       setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
       return;
     }
-    setGenerating(true);
+    startKind(kind, paper.id);
     const details = artifactDetails[kind];
     const draft: GeneratedArtifact = {
       id: uid(),
@@ -1106,26 +1315,30 @@ export default function Home() {
       updatedAt: new Date().toISOString(),
     };
     let artifact = draft;
-    const start = { ...workspace, artifacts: [draft, ...workspace.artifacts.filter((item) => item.kind !== kind)] };
+    const base = workspaceRef.current;
+    const start = { ...base, artifacts: [draft, ...base.artifacts.filter((item) => item.kind !== kind)] };
     commitWorkspace(start);
     try {
       await streamResponse(kind, `请分析《${paper.title}》。`, documentContext(paper), [], (content) => {
         artifact = { ...artifact, content, updatedAt: new Date().toISOString() };
-        commitWorkspace({ ...workspace, artifacts: [artifact, ...workspace.artifacts.filter((item) => item.kind !== kind)] });
+        const current = workspaceRef.current;
+        commitWorkspace({ ...current, artifacts: [artifact, ...current.artifacts.filter((item) => item.kind !== kind)] });
       });
     } catch (error) {
       artifact = { ...artifact, content: `生成失败：${error instanceof Error ? error.message : "未知错误"}`, updatedAt: new Date().toISOString() };
-      commitWorkspace({ ...workspace, artifacts: [artifact, ...workspace.artifacts.filter((item) => item.kind !== kind)] });
+      const current = workspaceRef.current;
+      commitWorkspace({ ...current, artifacts: [artifact, ...current.artifacts.filter((item) => item.kind !== kind)] });
     } finally {
-      setGenerating(false);
+      finishKind(kind, paper?.id);
     }
   }
 
   function editArtifact(kind: ArtifactKind, content: string) {
-    const current = workspace.artifacts.find((item) => item.kind === kind);
+    const base = workspaceRef.current;
+    const current = base.artifacts.find((item) => item.kind === kind);
     if (!current) return;
     const next = { ...current, content, updatedAt: new Date().toISOString() };
-    commitWorkspace({ ...workspace, artifacts: workspace.artifacts.map((item) => (item.id === next.id ? next : item)) });
+    commitWorkspace({ ...base, artifacts: base.artifacts.map((item) => (item.id === next.id ? next : item)) });
   }
 
   async function testKey(provider: ModelProvider) {
@@ -1173,6 +1386,61 @@ export default function Home() {
     closeNoteEditor();
   }
 
+  // ---- 论文库排序：拖拽 + 置顶 ----
+
+  async function refreshLibraryOrder() {
+    try {
+      const fresh = await listPapers();
+      setPapers(fresh);
+    } catch {
+      // 刷新失败时保留当前顺序
+    }
+  }
+
+  async function togglePin(item: PaperMeta) {
+    const nextPinned = !item.pinned;
+    const updated = { ...item, pinned: nextPinned };
+    setPapers((current) => {
+      const others = current.filter((entry) => entry.id !== item.id);
+      if (nextPinned) {
+        // 置顶：放到置顶组最前（服务端会把其余置顶论文顺延）。
+        return [updated, ...others.filter((entry) => entry.pinned), ...others.filter((entry) => !entry.pinned)];
+      }
+      // 取消置顶：放到未置顶组最后。
+      return [...others.filter((entry) => entry.pinned), ...others.filter((entry) => !entry.pinned), updated];
+    });
+    try {
+      await setPaperPinned(item.id, nextPinned);
+      await refreshLibraryOrder();
+    } catch {
+      setNotice("置顶操作保存失败。");
+      await refreshLibraryOrder();
+    }
+  }
+
+  function reorderLibrary(fromId: string, toId: string) {
+    if (fromId === toId) return;
+    const fromIndex = papers.findIndex((entry) => entry.id === fromId);
+    const toIndex = papers.findIndex((entry) => entry.id === toId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const next = [...papers];
+    const [moved] = next.splice(fromIndex, 1);
+    const targetIndex = next.findIndex((entry) => entry.id === toId);
+    if (targetIndex < 0) return;
+    // 保持置顶组在前：置顶论文只能落在置顶组内，未置顶论文只能落在未置顶组内。
+    const pinnedCount = next.filter((entry) => entry.pinned).length + (moved.pinned ? 1 : 0);
+    const clampedIndex = moved.pinned
+      ? Math.min(targetIndex, pinnedCount - 1)
+      : Math.max(targetIndex, pinnedCount);
+    next.splice(clampedIndex, 0, moved);
+    setPapers(next);
+    // 以新顺序持久化（服务端按数组序号写 sort_order）。
+    void reorderPapers(next.map((entry) => entry.id)).catch(() => {
+      setNotice("排序保存失败，已恢复原顺序。");
+      void refreshLibraryOrder();
+    });
+  }
+
   if (!paper) {
     return (
       <main className="landing-shell">
@@ -1204,7 +1472,10 @@ export default function Home() {
           {notice && <p className={`notice ${uploadState === "error" ? "error" : ""}`}>{notice}</p>}
         </section>
         <section className="library-section">
-          <div className="section-label"><FolderOpen size={17} /> 本地论文库 <span>{visiblePapers.length}</span></div>
+          <div className="section-label">
+            <FolderOpen size={17} /> 本地论文库 <span>{visiblePapers.length}</span>
+            <small className="library-order-hint">拖动卡片排序 · 图钉置顶</small>
+          </div>
           <div className="library-search">
             <Search size={15} />
             <input
@@ -1234,8 +1505,38 @@ export default function Home() {
             <div className="library-grid">
               {visiblePapers.map((item) => (
                 <article
-                  className={`paper-card${backfillingId === item.id ? " is-backfilling" : ""}`}
+                  className={`paper-card${backfillingId === item.id ? " is-backfilling" : ""}${dragPaperId === item.id ? " is-dragging" : ""}${dragOverId === item.id ? " is-drag-over" : ""}`}
                   key={item.id}
+                  draggable={!libraryQuery.trim() && papers.length > 1}
+                  onDragStart={(event) => {
+                    if (libraryQuery.trim() || papers.length <= 1) return;
+                    setDragPaperId(item.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", item.id);
+                  }}
+                  onDragOver={(event) => {
+                    if (!dragPaperId || dragPaperId === item.id) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    if (dragOverId !== item.id) setDragOverId(item.id);
+                  }}
+                  onDragLeave={(event) => {
+                    if (dragOverId === item.id && !event.currentTarget.contains(event.relatedTarget as Node)) {
+                      setDragOverId(undefined);
+                    }
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (dragPaperId && dragPaperId !== item.id) {
+                      reorderLibrary(dragPaperId, item.id);
+                    }
+                    setDragPaperId(undefined);
+                    setDragOverId(undefined);
+                  }}
+                  onDragEnd={() => {
+                    setDragPaperId(undefined);
+                    setDragOverId(undefined);
+                  }}
                 >
                   <button className="paper-card-open" onClick={() => void openPaper(item)}>
                     <span className="paper-icon"><FileText size={22} /></span>
@@ -1259,14 +1560,9 @@ export default function Home() {
                       ) : null}
                       {item.keywords?.length ? (
                         <div className="paper-card-keywords" aria-label="关键词">
-                          {item.keywords.slice(0, 4).map((keyword, index) => (
+                          {item.keywords.map((keyword, index) => (
                             <span key={`${keyword}-${index}`}>{keyword}</span>
                           ))}
-                          {item.keywords.length > 4 ? (
-                            <span className="paper-keyword-more">
-                              +{item.keywords.length - 4}
-                            </span>
-                          ) : null}
                         </div>
                       ) : null}
                     </div>
@@ -1290,6 +1586,17 @@ export default function Home() {
                       <span>{item.note || "添加备注"}</span>
                     </button>
                   )}
+                  <button
+                    className={`paper-pin${item.pinned ? " active" : ""}`}
+                    aria-label={item.pinned ? `取消置顶 ${item.title}` : `置顶 ${item.title}`}
+                    title={item.pinned ? "取消置顶（已置顶）" : "置顶"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void togglePin(item);
+                    }}
+                  >
+                    <Pin size={14} />
+                  </button>
                   <button className="paper-remove" aria-label={`删除 ${item.title}`} onClick={() => void removePaper(item.id)}><Trash2 size={15} /></button>
                 </article>
               ))}
@@ -1327,6 +1634,7 @@ export default function Home() {
   }
 
   const artifact = rightView === "chat" ? undefined : workspace.artifacts.find((item) => item.kind === rightView);
+  const glmLocked = modelProvider === "glm" && runningKinds.size > 0;
   return (
     <main className="workspace-shell">
       <header className="workspace-header">
@@ -1339,6 +1647,7 @@ export default function Home() {
         </div>
       </header>
       <div
+        ref={gridRef}
         className="workspace-grid"
         style={isMobile ? undefined : ({
           gridTemplateColumns: `${leftCollapsed ? 0 : leftWidth}px minmax(0, 1fr) ${rightCollapsed ? 0 : rightWidth}px`,
@@ -1352,10 +1661,10 @@ export default function Home() {
             <button className="panel-collapse" onClick={() => setLeftCollapsed(true)} aria-label="折叠左侧" title="折叠左侧"><PanelLeftClose size={15} /></button>
           </div>
           <nav className="workspace-nav" aria-label="论文功能">
-            <button className={rightView === "chat" ? "active" : ""} onClick={() => setRightView("chat")}><MessageCircleMore size={17} /> 选段问答</button>
+            <button className={rightView === "chat" ? "active" : ""} onClick={() => openView("chat")}><MessageCircleMore size={17} /> 选段问答{runningKinds.has("chat") ? <LoaderCircle className="spin nav-side-icon" size={13} /> : noticeKinds.has("chat") ? <span className="nav-badge" aria-label="有新的问答结果" /> : null}</button>
             {(Object.keys(artifactDetails) as ArtifactKind[]).map((kind) => {
               const Icon = artifactDetails[kind].icon;
-              return <button key={kind} className={rightView === kind ? "active" : ""} onClick={() => setRightView(kind)}><Icon size={17} /> {artifactDetails[kind].title}</button>;
+              return <button key={kind} className={rightView === kind ? "active" : ""} onClick={() => openView(kind)}><Icon size={17} /> {artifactDetails[kind].title}{runningKinds.has(kind) ? <LoaderCircle className="spin nav-side-icon" size={13} /> : noticeKinds.has(kind) ? <span className="nav-badge" aria-label="有新的生成结果" /> : null}</button>;
             })}
           </nav>
           <div className="sidebar-divider" />
@@ -1366,13 +1675,20 @@ export default function Home() {
                 <button
                   key={section.id}
                   type="button"
-                  className={activeSectionId === section.id ? "active" : ""}
+                  className={[
+                    activeChapter.page === section.page ? "active" : "",
+                    activeChapter.sectionId === section.id ? "current" : "",
+                  ].filter(Boolean).join(" ")}
                   style={{ "--chapter-level": Math.min(5, Math.max(0, section.level - 1)) } as CSSProperties}
                   title={section.title}
-                  onClick={() => setChapterScrollRequest((current) => ({
-                    page: section.page,
-                    nonce: (current?.nonce ?? 0) + 1,
-                  }))}
+                  onClick={() => {
+                    setActiveChapter({ sectionId: section.id, page: section.page });
+                    setChapterScrollRequest((current) => ({
+                      page: section.page,
+                      sectionId: section.id,
+                      nonce: (current?.nonce ?? 0) + 1,
+                    }));
+                  }}
                 >
                   <span className="chapter-title">{section.title}</span>
                   <span className="chapter-page">p.{section.page}</span>
@@ -1390,12 +1706,14 @@ export default function Home() {
           conversations={workspace.conversations}
           activeConversationId={activeConversationId}
           onSelectConversation={selectConversation}
+          onDeleteConversation={deleteConversation}
           outline={paper.outline ?? []}
           requestedChapterPage={chapterScrollRequest}
           conversationFocusRequest={conversationFocusRequest}
+          pendingColor={pendingColor}
           onSelectAnchor={selectAnchor}
           onClearSelection={clearActiveSelection}
-          onActiveSectionChange={onActiveSectionChange}
+          onActiveChapterChange={onActiveChapterChange}
           leftCollapsed={leftCollapsed}
           rightCollapsed={rightCollapsed}
           onRestoreLeft={() => setLeftCollapsed(false)}
@@ -1420,7 +1738,7 @@ export default function Home() {
               activeConversationId={activeConversationId}
               question={question}
               setQuestion={setQuestion}
-              generating={generating}
+              generating={runningKinds.has("chat") || glmLocked}
               pendingColor={pendingColor}
               onPendingColorChange={setPendingColor}
               onChangeColor={changeConversationColor}
@@ -1428,6 +1746,7 @@ export default function Home() {
               onToggleContext={() => setContextMode((current) => !current)}
               onPrompt={(kind) => void sendQuestion(kind)}
               onSelectConversation={selectConversation}
+              onDeleteConversation={deleteConversation}
               provider={modelProvider}
             />
           ) : (
@@ -1435,7 +1754,7 @@ export default function Home() {
               kind={rightView}
               paper={paper}
               artifact={artifact}
-              generating={generating}
+              generating={runningKinds.has(rightView) || glmLocked}
               onGenerate={() => void generateArtifact(rightView)}
               onEdit={(content) => editArtifact(rightView, content)}
             />
@@ -1584,7 +1903,7 @@ function ModelSwitch({ mode, setMode, provider, setProvider }: {
   );
 }
 
-function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, provider }: {
+function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, onDeleteConversation, provider }: {
   anchors?: TextAnchor[];
   selectionGroup?: SelectionGroup;
   conversation?: Conversation;
@@ -1600,6 +1919,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   onToggleContext: () => void;
   onPrompt: (kind: PromptKind) => void;
   onSelectConversation: (conversation: Conversation) => void;
+  onDeleteConversation: (conversation: Conversation) => void;
   provider: ModelProvider;
 }) {
   const historyRef = useRef<HTMLDivElement>(null);
@@ -1654,22 +1974,40 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
       {indexItems.length ? (
         <div className="question-index-list">
           {indexItems.map((item) => (
-            <button
+            <div
               key={item.turn.id}
               className={`question-index-item ${item.conversation.id === activeConversationId ? "active" : ""}`}
-              onClick={() => jumpToIndex(item)}
             >
-              <span className="page">
-                {item.turn.selection?.anchors.length
-                  ? `p.${[...new Set(item.turn.selection.anchors.map((entry) => entry.page))].join("/")}`
-                  : `p.${item.conversation.anchor?.page ?? "全"}`}
-                {item.turn.kind === "context" || item.conversation.scope === "context" ? (
-                  <span className="index-badge">全文</span>
-                ) : null}
-              </span>
-              <p>{item.turn.content}</p>
-              <time>{readableDate(item.turn.createdAt)}</time>
-            </button>
+              <button
+                type="button"
+                className="question-index-item-main"
+                onClick={() => jumpToIndex(item)}
+              >
+                <span className="page">
+                  {item.turn.selection?.anchors.length
+                    ? `p.${[...new Set(item.turn.selection.anchors.map((entry) => entry.page))].join("/")}`
+                    : `p.${item.conversation.anchor?.page ?? "全"}`}
+                  {item.turn.kind === "context" || item.conversation.scope === "context" ? (
+                    <span className="index-badge">全文</span>
+                  ) : null}
+                </span>
+                <p>{item.turn.content}</p>
+                <time>{readableDate(item.turn.createdAt)}</time>
+              </button>
+              <button
+                type="button"
+                className="question-index-item-delete"
+                aria-label="删除这条问答记录"
+                title="删除这条问答记录"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onDeleteConversation(item.conversation);
+                }}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
           ))}
         </div>
       ) : <p className="index-empty">还没有提问记录，划选原文后提出的问题会出现在这里。</p>}

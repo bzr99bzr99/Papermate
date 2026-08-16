@@ -2,6 +2,30 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [2.0.0] - 2026-08-16
+
+### Added
+
+- Clickable citation and figure links in reading artifacts that jump to the target page or open external URLs (original PDF links only).
+- Annotation cleanup: saved conversations and annotations can be deleted.
+- Paper library drag-and-drop reordering with pin-to-top support (`/api/storage/papers/order`).
+- Refined theme with a unified CSS variable palette.
+
+### Changed
+
+- Model calling logic optimized for the DeepSeek and free Zhipu GLM providers (streaming, context trimming, error handling).
+- Task prompts further optimized for translation, context explanation, concept explanation, free questions, reading notes, mind maps, and writing analysis.
+- Persistent storage optimized (SQLite write path and workspace data handling).
+- Removed the separate `一键升级.bat` / `scripts/upgrade.ps1`; `一键安装.bat` now handles both fresh install and in-place upgrade automatically.
+- Documentation updated (README, install guides).
+
+### Fixed
+
+- Ctrl/Cmd+wheel zoom: live zoom now applies only to the page stack; P.x page labels stay constant instead of following the zoom and snapping back on commit.
+- Ctrl/Cmd+wheel zoom: grid slot height compensation is computed precisely, so lower pages no longer jump vertically at zoom commit.
+- Ctrl/Cmd+wheel zoom: anchor parsing works when the cursor is over the sticky toolbar, page labels, page gaps, or side margins; zoom no longer jumps.
+- Ctrl/Cmd+wheel zoom: commit uses a drift threshold with a two-stage delay, so small or rapid back-and-forth zooms no longer trigger repeated full re-renders; effective DPR is budgeted at high zoom so per-page canvas memory stays bounded.
+
 ## [1.1.0] - 2026-08-16
 
 ### Added

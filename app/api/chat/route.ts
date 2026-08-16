@@ -110,7 +110,13 @@ export async function POST(request: Request) {
       }),
     });
     if (!upstream.ok || !upstream.body) {
-      return NextResponse.json({ error: `${target.label} 请求失败，请检查 Key、额度和网络。` }, { status: upstream.status || 502, headers: { "Cache-Control": "no-store" } });
+      const reason =
+        upstream.status === 429
+          ? "（上游并发/速率限制，已在自动重试，若仍失败请稍后再试）"
+          : upstream.status === 401
+            ? "（API Key 无效或已失效）"
+            : "";
+      return NextResponse.json({ error: `${target.label} 请求失败（HTTP ${upstream.status}）${reason}，请检查 Key、额度和网络。` }, { status: upstream.status || 502, headers: { "Cache-Control": "no-store" } });
     }
     return new Response(sseTextStream(upstream.body), {
       headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store, no-transform" },

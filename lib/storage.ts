@@ -27,6 +27,7 @@ interface PaperRow {
   updated_at: string;
   page_count: number;
   original_ready: number;
+  pinned: number;
   pdf: Uint8Array | null;
   parsed_json: string;
 }
@@ -47,6 +48,8 @@ export interface PaperMateStorage {
   savePaper(paper: BackupPaper): void;
   findPaperBySourceHash(hash: string): BackupPaper | undefined;
   updatePaperNote(id: string, note: string): void;
+  setPaperPinned(id: string, pinned: boolean): void;
+  reorderPapers(ids: string[]): void;
   deletePaper(id: string): void;
   getWorkspace(paperId: string): PaperWorkspace;
   saveWorkspace(paperId: string, workspace: PaperWorkspace): void;
@@ -110,6 +113,7 @@ function paperToRow(paper: BackupPaper): {
       paper.updatedAt,
       paper.pageCount,
       paper.originalReady ? 1 : 0,
+      paper.pinned ? 1 : 0,
       buffer,
       parsed,
     ],
@@ -137,6 +141,7 @@ function rowToBackupPaper(row: PaperRow): BackupPaper {
     pageCount: row.page_count,
     outline: parsed.outline,
     originalReady: Boolean(row.original_ready),
+    pinned: Boolean(row.pinned),
     file: {
       name: row.file_name,
       type: "application/pdf",
@@ -182,6 +187,8 @@ export function openStorage(options: {
       updated_at TEXT NOT NULL,
       page_count INTEGER NOT NULL DEFAULT 0,
       original_ready INTEGER NOT NULL DEFAULT 0,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      sort_order REAL NOT NULL DEFAULT 0,
       pdf BLOB,
       parsed_json TEXT NOT NULL
     );
@@ -200,6 +207,12 @@ export function openStorage(options: {
   if (!existingPaperColumns.has("impact_factor")) {
     db.exec("ALTER TABLE papers ADD COLUMN impact_factor TEXT");
   }
+  if (!existingPaperColumns.has("pinned")) {
+    db.exec("ALTER TABLE papers ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!existingPaperColumns.has("sort_order")) {
+    db.exec("ALTER TABLE papers ADD COLUMN sort_order REAL NOT NULL DEFAULT 0");
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS workspaces (
       paper_id TEXT PRIMARY KEY,
@@ -217,8 +230,8 @@ export function openStorage(options: {
   const insertPaperStatement = db.prepare(`
     INSERT INTO papers (
       id, title, file_name, source_hash, keywords, journal_name, impact_factor,
-      note, created_at, updated_at, page_count, original_ready, pdf, parsed_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      note, created_at, updated_at, page_count, original_ready, pinned, pdf, parsed_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       file_name = excluded.file_name,
@@ -231,6 +244,7 @@ export function openStorage(options: {
       updated_at = excluded.updated_at,
       page_count = excluded.page_count,
       original_ready = excluded.original_ready,
+      pinned = excluded.pinned,
       pdf = excluded.pdf,
       parsed_json = excluded.parsed_json
   `);
@@ -243,6 +257,18 @@ export function openStorage(options: {
     "UPDATE papers SET source_hash = ?, updated_at = ? WHERE id = ?",
   );
   const updatePaperNote = db.prepare("UPDATE papers SET note = ? WHERE id = ?");
+  const setPaperPinnedStatement = db.prepare(
+    "UPDATE papers SET pinned = ? WHERE id = ?",
+  );
+  const shiftPinnedUpStatement = db.prepare(
+    "UPDATE papers SET sort_order = sort_order + 1 WHERE pinned = 1",
+  );
+  const setPaperSortStatement = db.prepare(
+    "UPDATE papers SET sort_order = ? WHERE id = ?",
+  );
+  const maxUnpinnedSortStatement = db.prepare(
+    "SELECT MAX(sort_order) AS max_sort FROM papers WHERE pinned = 0",
+  );
   const deleteWorkspace = db.prepare("DELETE FROM workspaces WHERE paper_id = ?");
   const deletePaper = db.prepare("DELETE FROM papers WHERE id = ?");
   const selectWorkspace = db.prepare("SELECT * FROM workspaces WHERE paper_id = ?");
@@ -274,7 +300,7 @@ export function openStorage(options: {
   return {
     listPaperMetas() {
       const rows = db
-        .prepare("SELECT id, title, file_name, source_hash, keywords, journal_name, impact_factor, note, created_at, updated_at, page_count, original_ready FROM papers ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, source_hash, keywords, journal_name, impact_factor, note, created_at, updated_at, page_count, original_ready, pinned FROM papers ORDER BY pinned DESC, sort_order ASC, updated_at DESC")
         .all() as Array<Omit<PaperRow, "pdf" | "parsed_json">>;
       return rows.map((row) => ({
         id: row.id,
@@ -289,6 +315,7 @@ export function openStorage(options: {
         updatedAt: row.updated_at,
         pageCount: row.page_count,
         originalReady: Boolean(row.original_ready),
+        pinned: Boolean(row.pinned),
       }));
     },
 
@@ -321,6 +348,43 @@ export function openStorage(options: {
 
     updatePaperNote(id, note) {
       updatePaperNote.run(note, id);
+    },
+
+    setPaperPinned(id, pinned) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (pinned) {
+          // 置顶：已有置顶论文顺延，当前论文排到置顶组最前。
+          shiftPinnedUpStatement.run();
+          setPaperPinnedStatement.run(1, id);
+          setPaperSortStatement.run(0, id);
+        } else {
+          // 取消置顶：排到未置顶组最后。
+          const row = maxUnpinnedSortStatement.get() as { max_sort: number | null };
+          const nextSort = Number.isFinite(row?.max_sort) ? (row?.max_sort ?? 0) + 1 : 0;
+          setPaperPinnedStatement.run(0, id);
+          setPaperSortStatement.run(nextSort, id);
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
+
+    reorderPapers(ids) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        // ids 为论文库完整显示顺序（置顶组在前、未置顶组在后），
+        // 全局序号即组内顺序（置顶论文恒在数组前部）。
+        for (let index = 0; index < ids.length; index += 1) {
+          setPaperSortStatement.run(index, ids[index]);
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     },
 
     deletePaper(id) {

@@ -14,14 +14,14 @@ The installer does not modify the original project folder when you choose a sepa
 
 ## Upgrading
 
-Double-click `一键升级.bat` in the project root to update an existing installation from the current project source:
+`一键安装.bat` handles both fresh installs and upgrades; there is no separate upgrade script:
 
-- Reads the install location, port, and shortcut settings from `%LOCALAPPDATA%\PaperMate\config.json`.
-- Stops the running PaperMate service before copying new source files.
-- Reinstalls dependencies, rebuilds the production app, and refreshes launchers, shortcuts, and the Windows app-list version.
-- Keeps the installed `data` folder intact, including `papermate.db`, WAL/SHM files, and `papermate-backup.json`.
+- Fresh install: the location picker appears and the installer copies the project to the chosen folder.
+- Existing install: the installer reads `%LOCALAPPDATA%\PaperMate\config.json`, skips the location picker, and upgrades the existing installation in place.
+- The upgrade stops any running PaperMate service, overwrites the install folder with the latest source, reinstalls dependencies, rebuilds the production app, and refreshes launchers, shortcuts, and the Windows app-list version.
+- The installed `data` folder is preserved, including `papermate.db`, WAL/SHM files, and `papermate-backup.json`.
 
-The separate `一键安装.bat` also enters this upgrade path automatically when an existing installation is detected. If you want to upgrade a different existing installation, run `scripts/upgrade.ps1` from PowerShell or pass `-Upgrade` to `scripts/install.ps1`.
+Power users can pass `-Upgrade` to `scripts/install.ps1` to upgrade a specific installation.
 
 ## Starting and Stopping
 
@@ -58,7 +58,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, enter your DeepSeek API key in the model settings, and verify the connection.
+Open `http://localhost:3000`, enter your DeepSeek or Zhipu GLM API key in the model settings, and verify the connection.
 
 Production build:
 
@@ -72,7 +72,7 @@ npm start
 - Windows 10 or Windows 11 for the one-click installer.
 - Node.js 22.5 or newer. The installer checks the version and automatically tries to install or upgrade to Node.js LTS with `winget` when it is missing or too old.
 - Internet access on first install to download npm dependencies.
-- A DeepSeek API key for AI features.
+- A DeepSeek API key or a free Zhipu GLM API key for AI features.
 
 ## Notes
 
