@@ -5,11 +5,23 @@ PaperMate includes a Windows one-click installer for people who do not want to r
 ## Windows One-Click Install
 
 1. Double-click `一键安装.bat` in the project root.
-2. Choose an installation folder. The default suggestion is `D:\PaperMate`; you can create a new folder or select another ordinary folder.
-3. Wait for the installer to copy the project, install npm dependencies, build the production app, and create shortcuts.
-4. After installation, use the desktop shortcut `PaperMate 论文助手` to start the app.
+2. If no PaperMate installation is detected, choose an installation folder. The default suggestion is `D:\PaperMate`; you can create a new folder or select another ordinary folder.
+3. If an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, the installer skips the location picker and upgrades that installation in place.
+4. Wait for the installer to copy the project, install npm dependencies, build the production app, and create shortcuts.
+5. After installation, use the desktop shortcut `PaperMate 论文助手` to start the app.
 
 The installer does not modify the original project folder when you choose a separate install location. It copies the source files into the selected folder and installs dependencies there. If you choose the project folder itself, it installs directly in place.
+
+## Upgrading
+
+Double-click `一键升级.bat` in the project root to update an existing installation from the current project source:
+
+- Reads the install location, port, and shortcut settings from `%LOCALAPPDATA%\PaperMate\config.json`.
+- Stops the running PaperMate service before copying new source files.
+- Reinstalls dependencies, rebuilds the production app, and refreshes launchers, shortcuts, and the Windows app-list version.
+- Keeps the installed `data` folder intact, including `papermate.db`, WAL/SHM files, and `papermate-backup.json`.
+
+The separate `一键安装.bat` also enters this upgrade path automatically when an existing installation is detected. If you want to upgrade a different existing installation, run `scripts/upgrade.ps1` from PowerShell or pass `-Upgrade` to `scripts/install.ps1`.
 
 ## Starting and Stopping
 
@@ -58,7 +70,7 @@ npm start
 ## Requirements
 
 - Windows 10 or Windows 11 for the one-click installer.
-- Node.js LTS. The installer automatically tries to install it with `winget` when it is missing.
+- Node.js 22.5 or newer. The installer checks the version and automatically tries to install or upgrade to Node.js LTS with `winget` when it is missing or too old.
 - Internet access on first install to download npm dependencies.
 - A DeepSeek API key for AI features.
 
@@ -66,4 +78,4 @@ npm start
 
 - The first release supports PDFs with a text layer only; scanned PDFs with no selectable text cannot be read.
 - The original PDF is not uploaded. Only the text excerpts needed for the current request are sent to the model provider.
-- Data is stored in the browser IndexedDB and mirrored to `data/papermate-backup.json` on local disk.
+- Data is stored in the local SQLite database at `data/papermate.db`. Complete JSON backups are written to `data/papermate-backup.json` only when you use the backup, export, or restore actions.

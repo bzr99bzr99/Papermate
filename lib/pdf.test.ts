@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   anchorExcerptParts,
   buildContext,
+  buildFullPaperContext,
+  buildPaperDigest,
   clampReaderZoom,
   cssMatrixForTextItem,
   defaultHighlightColor,
@@ -297,6 +299,18 @@ describe("paragraph segmentation", () => {
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0].text).toBe("A visual line wraps to the next row.");
+  });
+
+  it("splits a large title line from a smaller author line", () => {
+    const blocks = paragraphBlocksFromLines(1, [
+      { text: "A Study of Models", top: 800, fontSize: 18, hasEOL: false },
+      { text: "John Smith", top: 790, fontSize: 10, hasEOL: false },
+    ]);
+
+    expect(blocks.map((block) => block.text)).toEqual([
+      "A Study of Models",
+      "John Smith",
+    ]);
   });
 });
 
@@ -691,6 +705,83 @@ describe("multi-fragment model context", () => {
   });
 });
 
+describe("full-paper context digest", () => {
+  const page1Blocks = paragraphBlocksFromLines(1, [
+    { text: "Abstract", top: 800, fontSize: 16 },
+    { text: "Abstract body with the core contribution.", top: 780 },
+    { text: "Introduction", top: 760, fontSize: 16 },
+    { text: "Introduction body about the motivation.", top: 740 },
+  ]);
+  const page2Blocks = paragraphBlocksFromLines(2, [
+    { text: "Method", top: 800, fontSize: 16 },
+    { text: "Method body with the proposed algorithm.", top: 780 },
+  ]);
+  const page3Blocks = paragraphBlocksFromLines(3, [
+    { text: "Conclusion", top: 800, fontSize: 16 },
+    { text: "Conclusion body with the main findings.", top: 780 },
+  ]);
+  const pages: ParsedPage[] = [
+    {
+      page: 1,
+      text: page1Blocks.map((block) => block.text).join("\n"),
+      blocks: page1Blocks,
+      figures: [],
+    },
+    {
+      page: 2,
+      text: page2Blocks.map((block) => block.text).join("\n"),
+      blocks: page2Blocks,
+      figures: [],
+    },
+    {
+      page: 3,
+      text: page3Blocks.map((block) => block.text).join("\n"),
+      blocks: page3Blocks,
+      figures: [],
+    },
+  ];
+  const outline: PaperSection[] = [
+    { id: "s1", title: "Abstract", page: 1, level: 1, source: "inferred" },
+    { id: "s2", title: "Introduction", page: 1, level: 1, source: "inferred" },
+    { id: "s3", title: "Method", page: 2, level: 1, source: "inferred" },
+    { id: "s4", title: "Conclusion", page: 3, level: 1, source: "inferred" },
+  ];
+
+  it("builds a structured digest with title, outline and section excerpts", () => {
+    const digest = buildPaperDigest(pages, outline, "Test Paper", 2000);
+    expect(digest).toContain("论文标题：Test Paper");
+    expect(digest).toContain("全文结构：");
+    expect(digest).toContain("Abstract body with the core contribution.");
+    expect(digest).toContain("Introduction body about the motivation.");
+    expect(digest).toContain("Method body with the proposed algorithm.");
+    expect(digest).toContain("Conclusion body with the main findings.");
+  });
+
+  it("caps the digest at the requested character limit", () => {
+    const digest = buildPaperDigest(pages, outline, "Test Paper", 250);
+    expect(digest.length).toBeLessThanOrEqual(250);
+  });
+
+  it("falls back to inferred sections when no outline is available", () => {
+    const digest = buildPaperDigest(pages, [], "Test Paper", 2000);
+    expect(digest).toContain("Abstract body with the core contribution.");
+    expect(digest).toContain("Method body with the proposed algorithm.");
+  });
+
+  it("always keeps the selected quote inside the full context", () => {
+    const anchor = makeAnchor(
+      "paper-1",
+      pages[2],
+      "Conclusion body with the main findings.",
+      pages[2].text.indexOf("Conclusion body with the main findings."),
+    );
+    const full = buildFullPaperContext(pages, anchor, outline, "Test Paper", 2000);
+    expect(full).toContain("用户选中内容：Conclusion body with the main findings.");
+    expect(full).toContain("Abstract body with the core contribution.");
+    expect(full.length).toBeLessThanOrEqual(2000);
+  });
+});
+
 describe("reader zoom", () => {
   it("clamps invalid, low, and high zoom values", () => {
     expect(clampReaderZoom(Number.NaN)).toBe(1);
@@ -771,6 +862,7 @@ describe("highlight region derivation", () => {
     id: string;
     anchor?: TextAnchor;
     selection?: SelectionGroup;
+    scope?: "normal" | "context";
     color?: HighlightColor;
     updatedAt?: string;
     userQuestion?: string;
@@ -781,6 +873,7 @@ describe("highlight region derivation", () => {
       paperId: "paper-1",
       anchor: options.anchor,
       selection: options.selection,
+      scope: options.scope,
       title: "测试问答",
       color: options.color,
       turns: options.userQuestion
@@ -876,6 +969,26 @@ describe("highlight region derivation", () => {
     expect(regions.every((region) => region.conversationIds.includes("c1"))).toBe(
       true,
     );
+  });
+
+  it("keeps context conversations in the same highlight region", () => {
+    const regions = deriveHighlightRegions([
+      conversation({
+        id: "c1",
+        anchor: anchorA,
+        scope: "normal",
+        userQuestion: "普通提问",
+      }),
+      conversation({
+        id: "c2",
+        anchor: anchorA,
+        scope: "context",
+        userQuestion: "全文上下文提问",
+      }),
+    ]);
+
+    expect(regions).toHaveLength(1);
+    expect(regions[0].conversationIds.sort()).toEqual(["c1", "c2"]);
   });
 
   it("ignores conversations without a user question", () => {

@@ -47,6 +47,26 @@ export function isBackup(value: unknown): value is PaperMateBackup {
   );
 }
 
+export function isBackupPaper(value: unknown): value is BackupPaper {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<BackupPaper>;
+  const file = candidate.file;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.title === "string" &&
+    typeof candidate.fileName === "string" &&
+    typeof candidate.createdAt === "string" &&
+    typeof candidate.updatedAt === "string" &&
+    typeof candidate.pageCount === "number" &&
+    Array.isArray(candidate.pages) &&
+    !!file &&
+    typeof file.name === "string" &&
+    typeof file.type === "string" &&
+    typeof file.size === "number" &&
+    typeof file.base64 === "string"
+  );
+}
+
 export async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = "";

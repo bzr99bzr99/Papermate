@@ -1,7 +1,11 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" -ChooseInstallDir
+if exist "%LOCALAPPDATA%\PaperMate\config.json" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" -Upgrade
+) else (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" -ChooseInstallDir
+)
 if errorlevel 1 (
   echo.
   echo Install failed. See the messages above.

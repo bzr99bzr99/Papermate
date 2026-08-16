@@ -1,6 +1,8 @@
 export type ModelMode = "fast" | "deep";
+export type ModelProvider = "deepseek" | "glm";
 export type PromptKind = "translate" | "context" | "concept" | "free";
 export type ArtifactKind = "notes" | "mindmap" | "writing";
+export type ConversationScope = "normal" | "context";
 export type PaperSectionSource = "outline" | "inferred";
 
 export interface TextAnchor {
@@ -85,11 +87,29 @@ export interface Paper {
   file: Blob;
   sourceHash?: string;
   note?: string;
+  keywords?: string[];
+  journal?: string;
+  impactFactor?: string;
   createdAt: string;
   updatedAt: string;
   pages: ParsedPage[];
   pageCount: number;
   outline?: PaperSection[];
+  originalReady?: boolean;
+}
+
+export interface PaperMeta {
+  id: string;
+  title: string;
+  fileName: string;
+  sourceHash?: string;
+  note?: string;
+  keywords?: string[];
+  journal?: string;
+  impactFactor?: string;
+  createdAt: string;
+  updatedAt: string;
+  pageCount: number;
   originalReady?: boolean;
 }
 
@@ -123,6 +143,7 @@ export interface ChatTurn {
   content: string;
   createdAt: string;
   mode?: ModelMode;
+  provider?: ModelProvider;
   kind?: PromptKind;
   anchor?: TextAnchor;
   selection?: SelectionGroup;
@@ -133,6 +154,7 @@ export interface Conversation {
   paperId: string;
   anchor?: TextAnchor;
   selection?: SelectionGroup;
+  scope?: ConversationScope;
   title: string;
   color?: HighlightColor;
   turns: ChatTurn[];

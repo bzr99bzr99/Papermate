@@ -759,7 +759,14 @@ export function paragraphBlocksFromLines(
       const explicitBreak = Boolean(previousPending.hasEOL);
       const gap = Math.abs(line.top - previousPending.top);
       const verticalBreak = gap > Math.max(18, (previousPending.fontSize ?? 11) * 1.8);
-      if (changedColumn || explicitBreak || verticalBreak) flush();
+      const previousFont = previousPending.fontSize;
+      const currentFont = line.fontSize;
+      const fontDropBreak =
+        previousFont !== undefined &&
+        currentFont !== undefined &&
+        gap > 3 &&
+        currentFont <= previousFont * 0.82;
+      if (changedColumn || explicitBreak || verticalBreak || fontDropBreak) flush();
     }
 
     const cells = splitTableRow(text);
@@ -870,6 +877,163 @@ function buildSingleAnchorContext(
     "相邻上下文：",
     ...nearby.map((block) => `[第 ${block.page} 页，段 ${block.index + 1}] ${block.text}`),
   ].join("\n");
+}
+
+export const FULL_PAPER_DIGEST_CHARS = 60000;
+const FULL_PAPER_MIN_DIGEST_CHARS = 8000;
+const CONTEXT_SECTION_PARAGRAPHS = 3;
+const CONTEXT_SPECIAL_SECTION_PARAGRAPHS = 5;
+const CONTEXT_PARAGRAPH_CHARS = 600;
+const CONTEXT_CAPTION_CHARS = 300;
+
+function isContextPrioritySection(title: string): boolean {
+  const normalized = normalizeSectionTitle(title).toLocaleLowerCase();
+  return /abstract|conclusion|conclusions|summary/.test(normalized);
+}
+
+function sectionHeadingPosition(
+  pages: ParsedPage[],
+  title: string,
+): { pageIndex: number; blockIndex: number } | undefined {
+  const normalized = normalizeSectionTitle(title).toLocaleLowerCase();
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    const page = pages[pageIndex];
+    for (let blockIndex = 0; blockIndex < page.blocks.length; blockIndex += 1) {
+      const block = page.blocks[blockIndex];
+      if (
+        block.kind === "heading" &&
+        normalizeSectionTitle(block.text).toLocaleLowerCase() === normalized
+      ) {
+        return { pageIndex, blockIndex };
+      }
+    }
+  }
+  return undefined;
+}
+
+function contextSectionLines(
+  pages: ParsedPage[],
+  section: PaperSection,
+  nextSection?: PaperSection,
+): string[] {
+  const maxParagraphs = isContextPrioritySection(section.title)
+    ? CONTEXT_SPECIAL_SECTION_PARAGRAPHS
+    : CONTEXT_SECTION_PARAGRAPHS;
+  const start = sectionHeadingPosition(pages, section.title);
+  const end = nextSection ? sectionHeadingPosition(pages, nextSection.title) : undefined;
+  if (!start) return [];
+  const lines: string[] = [];
+  let paragraphCount = 0;
+  for (let pageIndex = start.pageIndex; pageIndex < pages.length; pageIndex += 1) {
+    const page = pages[pageIndex];
+    const startBlockIndex = pageIndex === start.pageIndex ? start.blockIndex + 1 : 0;
+    const endBlockIndex =
+      end && pageIndex === end.pageIndex ? end.blockIndex : page.blocks.length;
+    for (let blockIndex = startBlockIndex; blockIndex < endBlockIndex; blockIndex += 1) {
+      const block = page.blocks[blockIndex];
+      if (block.kind === "heading" || block.kind === "table" || block.kind === "equation") {
+        continue;
+      }
+      if (block.kind === "caption") {
+        const caption = block.text.trim();
+        if (caption) lines.push(`[p.${block.page}] ${caption.slice(0, CONTEXT_CAPTION_CHARS)}`);
+        continue;
+      }
+      if (paragraphCount >= maxParagraphs) continue;
+      const text = block.text.trim();
+      if (!text) continue;
+      lines.push(`[p.${block.page}] ${text.slice(0, CONTEXT_PARAGRAPH_CHARS)}`);
+      paragraphCount += 1;
+    }
+    if (end && pageIndex >= end.pageIndex) break;
+  }
+  return lines;
+}
+
+function contextFallbackLines(pages: ParsedPage[], perPage = 3): string[] {
+  const lines: string[] = [];
+  for (const page of pages) {
+    let count = 0;
+    for (const block of page.blocks) {
+      if (count >= perPage) break;
+      if (block.kind === "heading" || block.kind === "table" || block.kind === "equation") {
+        continue;
+      }
+      const text = block.text.trim();
+      if (!text) continue;
+      lines.push(`[p.${block.page}] ${text.slice(0, CONTEXT_PARAGRAPH_CHARS)}`);
+      count += 1;
+    }
+  }
+  return lines;
+}
+
+export function buildPaperDigest(
+  pages: ParsedPage[],
+  outline: PaperSection[] = [],
+  title = "",
+  maxChars = FULL_PAPER_DIGEST_CHARS,
+): string {
+  if (maxChars <= 0) return "";
+  const sections = outline.length ? deduplicateSections(outline) : inferSectionsFromPages(pages);
+  const sorted = sections.slice().sort((a, b) => a.page - b.page || a.level - b.level);
+  const topLevel = sorted.filter((section) => section.level === 1);
+  const grouped = topLevel.length ? topLevel : sorted;
+  const outlineLines = sorted.map((section) => {
+    const indent = "  ".repeat(Math.max(0, section.level - 1));
+    return `${indent}- ${section.title}（p.${section.page}）`;
+  });
+  const head = [
+    title ? `论文标题：${title}` : "",
+    outlineLines.length ? "全文结构：" : "",
+    ...outlineLines,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  let remaining = maxChars - head.length;
+  if (remaining < 0) return head.slice(0, maxChars);
+
+  const parts = [head];
+  const priority = grouped.filter((section) => isContextPrioritySection(section.title));
+  const rest = grouped.filter((section) => !isContextPrioritySection(section.title));
+  const ordered = [...priority, ...rest.sort((a, b) => a.page - b.page || a.level - b.level)];
+  for (const section of ordered) {
+    const groupedIndex = grouped.indexOf(section);
+    const nextSection =
+      groupedIndex >= 0 && groupedIndex < grouped.length - 1
+        ? grouped[groupedIndex + 1]
+        : undefined;
+    const body = contextSectionLines(pages, section, nextSection).join("\n");
+    if (!body) continue;
+    const part = `\n\n## ${section.title}（p.${section.page}）\n${body}`;
+    if (part.length > remaining) break;
+    parts.push(part);
+    remaining -= part.length;
+  }
+
+  if (parts.length === 1) {
+    for (const line of contextFallbackLines(pages)) {
+      const part = `\n${line}`;
+      if (part.length > remaining) break;
+      parts.push(part);
+      remaining -= part.length;
+    }
+  }
+  return parts.join("");
+}
+
+export function buildFullPaperContext(
+  pages: ParsedPage[],
+  anchor?: TextAnchor | TextAnchor[],
+  outline: PaperSection[] = [],
+  title = "",
+  maxChars = FULL_PAPER_DIGEST_CHARS,
+): string {
+  const selectedContext = buildContext(pages, anchor, 2);
+  const digestLimit = Math.max(FULL_PAPER_MIN_DIGEST_CHARS, maxChars - selectedContext.length);
+  const digest = buildPaperDigest(pages, outline, title, digestLimit);
+  if (!digest.trim()) return selectedContext;
+  return `${digest}\n\n${selectedContext}`;
 }
 
 function normalizeSectionTitle(value: string): string {

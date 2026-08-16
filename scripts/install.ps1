@@ -8,6 +8,7 @@ param(
     [int]$PreferredPort = 3000,
     [string]$InstallDir = "",
     [string]$AppDataDir = "",
+    [switch]$Upgrade,
     [switch]$ChooseInstallDir,
     [switch]$SkipShortcuts,
     [switch]$SkipDependencies,
@@ -67,6 +68,91 @@ function Test-PathInside {
     return $childFull.StartsWith($parentFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Read-InstalledConfig {
+    param([string]$AppDataDir)
+    $configPath = Join-Path $AppDataDir "config.json"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        return $null
+    }
+    return (Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json)
+}
+
+function Get-PackageVersion {
+    param([string]$ProjectPath)
+    $packagePath = Join-Path $ProjectPath "package.json"
+    if (-not (Test-Path -LiteralPath $packagePath)) {
+        return "0.0.0"
+    }
+    try {
+        $package = Get-Content -Raw -LiteralPath $packagePath | ConvertFrom-Json
+        $version = [string]$package.version
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+    }
+    catch {
+        # Fall through to a safe default when package.json cannot be parsed.
+    }
+    return "0.0.0"
+}
+
+function Wait-ForPortFree {
+    param([int]$Port, [int]$TimeoutSeconds = 15)
+    for ($i = 0; $i -lt $TimeoutSeconds; $i++) {
+        $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
+        if (-not $listener) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+$installedConfig = Read-InstalledConfig -AppDataDir $AppDataDir
+
+if ($Upgrade) {
+    if (-not $installedConfig) {
+        throw "未检测到已安装的 PaperMate，请先运行一键安装。"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+        $configuredInstallDir = [string]$installedConfig.projectDir
+        if ([string]::IsNullOrWhiteSpace($configuredInstallDir)) {
+            throw "已安装配置缺少 projectDir，无法执行升级。"
+        }
+        if (-not (Test-Path -LiteralPath $configuredInstallDir)) {
+            throw "配置中的安装目录不存在：$configuredInstallDir"
+        }
+        $InstallDir = $configuredInstallDir
+        $projectDir = [System.IO.Path]::GetFullPath($InstallDir)
+    }
+    else {
+        $projectDir = [System.IO.Path]::GetFullPath($InstallDir)
+    }
+
+    if (-not $PSBoundParameters.ContainsKey("ShortcutName") -and $installedConfig.shortcutName) {
+        $ShortcutName = [string]$installedConfig.shortcutName
+    }
+    if (-not $PSBoundParameters.ContainsKey("UninstallShortcutName") -and $installedConfig.uninstallShortcutName) {
+        $UninstallShortcutName = [string]$installedConfig.uninstallShortcutName
+    }
+    if (-not $PSBoundParameters.ContainsKey("StopShortcutName") -and $installedConfig.stopShortcutName) {
+        $StopShortcutName = [string]$installedConfig.stopShortcutName
+    }
+    if (-not $PSBoundParameters.ContainsKey("StartMenuFolder") -and $installedConfig.startMenuFolder) {
+        $StartMenuFolder = [string]$installedConfig.startMenuFolder
+    }
+    if (-not $PSBoundParameters.ContainsKey("PreferredPort") -and $installedConfig.port) {
+        $portFromConfig = 0
+        if ([int]::TryParse([string]$installedConfig.port, [ref]$portFromConfig) -and $portFromConfig -gt 0) {
+            $PreferredPort = $portFromConfig
+        }
+    }
+
+    Write-Host "检测到已安装版本，将保留数据并升级到最新源码。" -ForegroundColor Yellow
+    Write-Host "安装目录：$projectDir"
+}
+
 if (-not (Test-SamePath $projectDir $sourceProjectDir)) {
     $driveRoot = [System.IO.Path]::GetPathRoot($projectDir).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     $trimmedProjectDir = $projectDir.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
@@ -79,6 +165,13 @@ if (-not (Test-SamePath $projectDir $sourceProjectDir)) {
     }
     if (Test-PathInside $sourceProjectDir $projectDir) {
         throw "安装位置不能选在项目文件夹内部，请选择其他位置。"
+    }
+}
+
+if ($Upgrade -and -not (Test-SamePath $projectDir $sourceProjectDir)) {
+    $markerPath = Join-Path $projectDir ".papermate-installed.json"
+    if (-not (Test-Path -LiteralPath $markerPath)) {
+        throw "安装目录中没有找到 .papermate-installed.json，请确认这是 PaperMate 的安装位置：$projectDir"
     }
 }
 
@@ -133,6 +226,18 @@ function Get-WingetPath {
         }
     }
     return $null
+}
+
+function Test-NodeVersion {
+    param([string]$NodePath)
+    try {
+        $versionText = (& $NodePath --version) 2>$null
+        $version = [version]($versionText.TrimStart("v"))
+        return $version -ge [version]"22.5.0"
+    }
+    catch {
+        return $false
+    }
 }
 
 function Get-FreePort {
@@ -274,6 +379,24 @@ if (-not $node) {
     }
 }
 
+if (-not (Test-NodeVersion $node)) {
+    $winget = Get-WingetPath
+    if (-not $winget) {
+        throw "Node.js 版本过低（需要 22.5.0 或更高），且没有找到 winget。请先升级 Node.js LTS，再重新运行一键安装。"
+    }
+
+    Write-Host "Node.js 版本过低，正在通过 winget 升级到 Node.js LTS..."
+    & $winget install --id OpenJS.NodeJS.LTS -e --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        throw "Node.js 自动升级失败，请手动安装 Node.js LTS（22.5.0 或更高）后重试。"
+    }
+
+    $node = Get-NodePath
+    if (-not $node -or -not (Test-NodeVersion $node)) {
+        throw "Node.js 已升级但版本仍低于 22.5.0，请重启电脑或手动安装最新 LTS 后重试。"
+    }
+}
+
 $npm = Get-NpmPath
 if (-not $npm) {
     throw "找不到 npm，请检查 Node.js 安装是否完整。"
@@ -292,12 +415,17 @@ Stop-ProjectNodeProcesses $projectDir
 if (-not (Test-SamePath $projectDir $sourceProjectDir)) {
     Stop-ProjectNodeProcesses $sourceProjectDir
 }
+if ($Upgrade -and -not (Wait-ForPortFree $PreferredPort 15)) {
+    Write-Host "端口 $PreferredPort 仍被占用，安装器会尝试其他可用端口。" -ForegroundColor Yellow
+}
 
 if (-not (Test-SamePath $projectDir $sourceProjectDir)) {
     Write-Step "复制项目到安装位置"
     Copy-ProjectToInstallDir -Source $sourceProjectDir -Destination $projectDir
+    $packageVersion = Get-PackageVersion $sourceProjectDir
     $marker = [ordered]@{
         appName          = $appName
+        version          = $packageVersion
         sourceProjectDir = $sourceProjectDir
         installedAt      = (Get-Date).ToString("s")
     }
@@ -371,9 +499,10 @@ shell.Run command, 0, False
 [System.IO.File]::WriteAllText($vbsPath, $vbsContent, [System.Text.Encoding]::ASCII)
 
 $port = Get-FreePort $PreferredPort
+$packageVersion = Get-PackageVersion $sourceProjectDir
 $config = [ordered]@{
     appName               = $appName
-    version               = "0.1.0"
+    version               = $packageVersion
     projectDir            = $projectDir
     sourceProjectDir      = $sourceProjectDir
     installedCopy         = (-not (Test-SamePath $projectDir $sourceProjectDir))
@@ -456,7 +585,7 @@ if (-not $SkipShortcuts) {
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaperMate"
     New-Item -Path $regPath -Force | Out-Null
     New-ItemProperty -Path $regPath -Name "DisplayName" -Value $ShortcutName -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $regPath -Name "DisplayVersion" -Value "0.1.0" -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $regPath -Name "DisplayVersion" -Value $packageVersion -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $regPath -Name "Publisher" -Value "Local PaperMate" -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $regPath -Name "InstallLocation" -Value $projectDir -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $regPath -Name "DisplayIcon" -Value $uninstallIcon -PropertyType String -Force | Out-Null

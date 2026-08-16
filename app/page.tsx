@@ -44,6 +44,7 @@ import {
   Upload,
   WandSparkles,
   X,
+  Zap,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -57,25 +58,31 @@ import {
 } from "@/components/pdf-reader";
 import {
   deletePaper,
+  exportBackup,
+  fetchDiskBackup,
   findPaperBySourceHash,
+  getPaper,
+  getSettings,
   getWorkspace,
+  importBackup,
   listPapers,
-  listWorkspaces,
-  replaceAll,
+  lookupPaperMetadata,
+  saveSettings,
   savePaper,
   saveWorkspace,
   updatePaperNote,
 } from "@/lib/db";
+import { buildBackup, isBackup, type BackupSettings } from "@/lib/backup";
+import * as legacyDb from "@/lib/legacy-idb";
 import {
-  backupToPaper,
-  buildBackup,
-  isBackup,
-  type BackupSettings,
-  type PaperMateBackup,
-} from "@/lib/backup";
+  isWeakPaperTitle,
+  type PaperMetadataBlockInput,
+  type PaperMetadataPatch,
+} from "@/lib/paper-metadata";
 import {
   anchorExcerptParts,
   buildContext,
+  buildPaperDigest,
   defaultHighlightColor,
   deriveHighlightRegions,
   HIGHLIGHT_COLORS,
@@ -92,7 +99,9 @@ import type {
   GeneratedArtifact,
   HighlightColor,
   ModelMode,
+  ModelProvider,
   Paper,
+  PaperMeta,
   PaperWorkspace,
   PromptKind,
   SelectionGroup,
@@ -100,8 +109,10 @@ import type {
 } from "@/lib/types";
 
 type RightView = "chat" | ArtifactKind;
+type KeyState = "idle" | "testing" | "valid" | "invalid";
 
 const THEME_KEY = "papermate-theme-v1";
+const LAYOUT_KEY = "papermate-layout-v1";
 const BACKUP_FILE_PATH = "data/papermate-backup.json";
 type ThemeId = "classic" | "paper-white" | "bean-green" | "parchment" | "dark" | "cyberpunk" | "mono" | "academic-blue" | "morandi" | "noble";
 const THEME_IDS: ThemeId[] = ["classic", "paper-white", "bean-green", "parchment", "dark", "cyberpunk", "mono", "academic-blue", "morandi", "noble"];
@@ -157,6 +168,113 @@ function readableDateTime(value: string) {
   }).format(date);
 }
 
+function paperToMeta(paper: Paper): PaperMeta {
+  return {
+    id: paper.id,
+    title: paper.title,
+    fileName: paper.fileName,
+    sourceHash: paper.sourceHash,
+    note: paper.note,
+    keywords: paper.keywords,
+    journal: paper.journal,
+    impactFactor: paper.impactFactor,
+    createdAt: paper.createdAt,
+    updatedAt: paper.updatedAt,
+    pageCount: paper.pageCount,
+    originalReady: paper.originalReady,
+  };
+}
+
+function firstPageMetadataBlocks(
+  pages: Array<{
+    blocks: Array<{ text: string; fontSize?: number; top: number; kind?: string }>;
+    height?: number;
+  }>,
+): { blocks: PaperMetadataBlockInput[]; pageHeight?: number } {
+  const page = pages[0];
+  const height = page?.height;
+  return {
+    blocks:
+      page?.blocks
+        .slice(0, 80)
+        .map((block) => ({
+          text: block.text,
+          fontSize: block.fontSize,
+          top:
+            height && Number.isFinite(block.top)
+              ? Math.max(0, Math.min(height, height - block.top))
+              : block.top,
+          kind: block.kind,
+        })) ?? [],
+    pageHeight: height,
+  };
+}
+
+function debounce(fn: () => void | Promise<void>, delay: number) {
+  let timer: number | undefined;
+  let inFlight: Promise<void> | undefined;
+  const run = () => {
+    const next = Promise.resolve(fn()).catch(() => {});
+    inFlight = next;
+    void next.finally(() => {
+      if (inFlight === next) inFlight = undefined;
+    });
+  };
+  const schedule = () => {
+    if (timer !== undefined) window.clearTimeout(timer);
+    timer = window.setTimeout(() => {
+      timer = undefined;
+      run();
+    }, delay);
+  };
+  const flush = () => {
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      timer = undefined;
+      run();
+    }
+    return inFlight ?? Promise.resolve();
+  };
+  return { schedule, flush };
+}
+
+function isNormalScope(conversation: Conversation): boolean {
+  return (conversation.scope ?? "normal") === "normal";
+}
+
+function conversationMatchesSelection(
+  conversation: Conversation,
+  selection?: SelectionGroup,
+  anchor?: TextAnchor,
+): boolean {
+  if (selection) {
+    return (
+      conversation.selection?.id === selection.id ||
+      conversation.anchor?.id === selection.anchors[0]?.id
+    );
+  }
+  return anchor ? conversation.anchor?.id === anchor.id : false;
+}
+
+function buildContextHistoryMessages(turns: ChatTurn[], fullDigest: string) {
+  const firstContextIndex = turns.findIndex(
+    (turn) => turn.role === "user" && turn.kind === "context",
+  );
+  if (firstContextIndex < 0) {
+    return turns.slice(-10).map((turn) => ({ role: turn.role, content: turn.content }));
+  }
+  const first = turns[firstContextIndex];
+  const tail = turns.slice(-9);
+  if (!tail.some((turn) => turn.id === first.id)) tail.unshift(first);
+  return tail.map((turn) => ({
+    role: turn.role,
+    content:
+      turn.id === first.id && fullDigest.trim()
+        ? `${turn.content}\n\n[论文全文摘要与结构]\n${fullDigest}`
+        : turn.content,
+  }));
+}
+
 function downloadFile(name: string, content: string, type: string) {
   const link = document.createElement("a");
   link.href = URL.createObjectURL(new Blob([content], { type }));
@@ -193,26 +311,9 @@ function documentContext(paper: Paper) {
   return text.length <= 155000 ? text : `${text.slice(0, 115000)}\n\n[中间内容因长度省略]\n\n${text.slice(-40000)}`;
 }
 
-interface BackupFetchResult extends PaperMateBackup {
-  filePath?: string;
-}
-
-async function fetchBackup(): Promise<BackupFetchResult> {
-  const response = await fetch("/api/storage/backup", { cache: "no-store" });
-  if (!response.ok) throw new Error("无法读取本机备份。");
-  const data = (await response.json()) as Partial<PaperMateBackup> & { filePath?: string };
-  return {
-    version: 1,
-    savedAt: data.savedAt ?? "",
-    papers: data.papers ?? [],
-    workspaces: data.workspaces ?? [],
-    filePath: data.filePath,
-  };
-}
-
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [papers, setPapers] = useState<Paper[]>([]);
+  const [papers, setPapers] = useState<PaperMeta[]>([]);
   const [paper, setPaper] = useState<Paper>();
   const [activeSectionId, setActiveSectionId] = useState<string>();
   const [chapterScrollRequest, setChapterScrollRequest] = useState<{
@@ -223,14 +324,19 @@ export default function Home() {
   const [activeAnchors, setActiveAnchors] = useState<TextAnchor[]>([]);
   const [rightView, setRightView] = useState<RightView>("chat");
   const [apiKey, setApiKey] = useState("");
+  const [glmApiKey, setGlmApiKey] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>("classic");
-  const [keyState, setKeyState] = useState<"idle" | "testing" | "valid" | "invalid">("idle");
+  const [keyState, setKeyState] = useState<KeyState>("idle");
+  const [glmKeyState, setGlmKeyState] = useState<KeyState>("idle");
   const [mode, setMode] = useState<ModelMode>("fast");
+  const [modelProvider, setModelProvider] = useState<ModelProvider>("deepseek");
   const [question, setQuestion] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [contextMode, setContextMode] = useState(false);
   const [pendingColor, setPendingColor] = useState<HighlightColor>(HIGHLIGHT_COLORS[0]);
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
+  const [backfillingId, setBackfillingId] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [libraryQuery, setLibraryQuery] = useState("");
   const [editingNotePaperId, setEditingNotePaperId] = useState<string>();
@@ -246,14 +352,27 @@ export default function Home() {
   const [backupState, setBackupState] = useState<"idle" | "saving" | "saved" | "error" | "restoring">("idle");
   const [backupSavedAt, setBackupSavedAt] = useState<string>();
   const [backupFilePath, setBackupFilePath] = useState(BACKUP_FILE_PATH);
-  const backupTimerRef = useRef<number | undefined>(undefined);
-  const backupInFlightRef = useRef(false);
-  const backupDirtyRef = useRef(false);
   const themeRef = useRef<ThemeId>("classic");
   themeRef.current = theme;
   const layoutRef = useRef({ leftWidth, rightWidth, leftCollapsed, rightCollapsed });
   layoutRef.current = { leftWidth, rightWidth, leftCollapsed, rightCollapsed };
-  const LAYOUT_KEY = "papermate-layout-v1";
+  const settingsLoadedRef = useRef(false);
+  const pendingWorkspaceRef = useRef<PaperWorkspace | null>(null);
+  const workspaceRef = useRef<PaperWorkspace>(blankWorkspace);
+  workspaceRef.current = workspace;
+  const paperIdRef = useRef<string | undefined>(paper?.id);
+  paperIdRef.current = paper?.id;
+  const saveWorkspaceDebouncer = useMemo(
+    () =>
+      debounce(() => {
+        const id = paperIdRef.current;
+        const next = pendingWorkspaceRef.current;
+        if (!id || !next) return;
+        pendingWorkspaceRef.current = null;
+        return saveWorkspace(id, next).catch(() => setNotice("本地成果保存失败。"));
+      }, 300),
+    [],
+  );
   const activeAnchor = activeAnchors[0];
   const activeSelection = useMemo(
     () => selectionGroupForAnchors(paper?.id ?? "", activeAnchors),
@@ -263,11 +382,22 @@ export default function Home() {
     () => deriveHighlightRegions(workspace.conversations),
     [workspace.conversations],
   );
+  const paperDigest = useMemo(
+    () => (paper ? buildPaperDigest(paper.pages, paper.outline ?? [], paper.title) : ""),
+    [paper],
+  );
   const visiblePapers = useMemo(() => {
     const query = libraryQuery.trim().toLocaleLowerCase();
     if (!query) return papers;
     return papers.filter((item) =>
-      [item.title, item.fileName, item.note ?? ""]
+      [
+        item.title,
+        item.fileName,
+        item.note ?? "",
+        item.keywords?.join(" ") ?? "",
+        item.journal ?? "",
+        item.impactFactor ?? "",
+      ]
         .join(" ")
         .toLocaleLowerCase()
         .includes(query),
@@ -275,54 +405,21 @@ export default function Home() {
   }, [libraryQuery, papers]);
 
   const writeBackupNow = useCallback(async () => {
-    if (backupInFlightRef.current) {
-      backupDirtyRef.current = true;
-      return;
-    }
-    backupInFlightRef.current = true;
+    await saveWorkspaceDebouncer.flush();
     setBackupState("saving");
     try {
-      const [currentPapers, currentWorkspaces] = await Promise.all([
-        listPapers(),
-        listWorkspaces(),
-      ]);
-      const backup = await buildBackup(currentPapers, currentWorkspaces, {
-        theme: themeRef.current,
-        layout: layoutRef.current,
-      });
-      const response = await fetch("/api/storage/backup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(backup),
-      });
-      if (!response.ok) throw new Error("backup-write-failed");
-      const result = (await response.json()) as { savedAt?: string; filePath?: string };
-      setBackupSavedAt(result.savedAt || backup.savedAt);
-      if (result.filePath) setBackupFilePath(result.filePath);
+      const result = await fetch("/api/storage/backup", { method: "POST" });
+      if (!result.ok) throw new Error("backup-write-failed");
+      const data = (await result.json()) as { savedAt?: string; filePath?: string };
+      if (data.savedAt) setBackupSavedAt(data.savedAt);
+      if (data.filePath) setBackupFilePath(data.filePath);
       setBackupState("saved");
+      setNotice("已生成完整 JSON 备份文件。");
     } catch {
       setBackupState("error");
       setNotice("本机磁盘备份失败，请检查磁盘空间或读写权限。");
-    } finally {
-      backupInFlightRef.current = false;
-      if (backupDirtyRef.current) {
-        backupDirtyRef.current = false;
-        void writeBackupNow();
-      }
     }
-  }, []);
-
-  const scheduleBackup = useCallback((delay = 1200) => {
-    backupDirtyRef.current = true;
-    if (backupTimerRef.current !== undefined) {
-      window.clearTimeout(backupTimerRef.current);
-    }
-    backupTimerRef.current = window.setTimeout(() => {
-      backupTimerRef.current = undefined;
-      backupDirtyRef.current = false;
-      void writeBackupNow();
-    }, delay);
-  }, [writeBackupNow]);
+  }, [saveWorkspaceDebouncer]);
 
   const applyBackupSettings = useCallback((settings?: BackupSettings) => {
     if (!settings) return;
@@ -339,18 +436,22 @@ export default function Home() {
 
   async function restoreFromBackup() {
     if (!window.confirm("从本机备份恢复会覆盖当前论文库，确定继续吗？")) return;
+    await saveWorkspaceDebouncer.flush();
     setBackupState("restoring");
     try {
-      const backup = await fetchBackup();
-      const restoredPapers = backup.papers.map(backupToPaper);
-      await replaceAll(restoredPapers, backup.workspaces);
-      setPapers(restoredPapers);
+      const disk = await fetchDiskBackup(true);
+      const backup = disk.backup;
+      if (!backup) throw new Error("backup-missing");
+      await importBackup(backup);
+      const restored = await listPapers();
+      setPapers(restored);
       setPaper(undefined);
-      setBackupSavedAt(backup.savedAt || undefined);
+      setBackupSavedAt(disk.savedAt || backup.savedAt || undefined);
+      if (disk.filePath) setBackupFilePath(disk.filePath);
       applyBackupSettings(backup.settings);
       setNotice(
-        restoredPapers.length || backup.workspaces.length
-          ? `已从本机磁盘备份恢复 ${restoredPapers.length} 篇论文。`
+        restored.length || backup.workspaces.length
+          ? `已从本机磁盘备份恢复 ${restored.length} 篇论文。`
           : "备份文件为空，论文库已清空。",
       );
       setBackupState("saved");
@@ -363,21 +464,14 @@ export default function Home() {
   async function exportBackupFile() {
     setBackupState("saving");
     try {
-      const [currentPapers, currentWorkspaces] = await Promise.all([
-        listPapers(),
-        listWorkspaces(),
-      ]);
-      const backup = await buildBackup(currentPapers, currentWorkspaces, {
-        theme: themeRef.current,
-        layout: layoutRef.current,
-      });
+      const backup = await exportBackup();
       const stamp = (backup.savedAt || new Date().toISOString()).slice(0, 10);
       downloadFile(
         `papermate-backup-${stamp}.json`,
         JSON.stringify(backup, null, 2),
         "application/json",
       );
-      setNotice(`已导出 ${currentPapers.length} 篇论文的备份文件，可复制到其他项目后导入。`);
+      setNotice(`已导出 ${backup.papers.length} 篇论文的备份文件，可复制到其他项目后导入。`);
       setBackupState("saved");
     } catch {
       setBackupState("error");
@@ -392,19 +486,19 @@ export default function Home() {
       return;
     }
     if (!window.confirm("导入备份会覆盖当前论文库，确定继续吗？")) return;
+    await saveWorkspaceDebouncer.flush();
     setBackupState("restoring");
     try {
       const parsed = JSON.parse(await file.text()) as unknown;
       if (!isBackup(parsed)) throw new Error("invalid-backup");
-      const restoredPapers = parsed.papers.map(backupToPaper);
-      await replaceAll(restoredPapers, parsed.workspaces);
-      setPapers(restoredPapers);
+      await importBackup(parsed);
+      const restored = await listPapers();
+      setPapers(restored);
       setPaper(undefined);
       setBackupSavedAt(parsed.savedAt || new Date().toISOString());
       applyBackupSettings(parsed.settings);
-      setNotice(`已从备份文件导入 ${restoredPapers.length} 篇论文和本地成果。`);
+      setNotice(`已从备份文件导入 ${restored.length} 篇论文和本地成果。`);
       setBackupState("saved");
-      void writeBackupNow();
     } catch {
       setBackupState("error");
       setNotice("无法导入备份：文件不是有效的 PaperMate 备份。");
@@ -415,25 +509,38 @@ export default function Home() {
     let cancelled = false;
     void (async () => {
       try {
-        const stored = await listPapers();
-        const backup = await fetchBackup().catch(() => undefined);
-        if (cancelled) return;
-        if (backup?.filePath) setBackupFilePath(backup.filePath);
-        if (stored.length) {
-          setPapers(stored);
-          if (backup?.savedAt) setBackupSavedAt(backup.savedAt);
-          return;
+        const [stored, disk] = await Promise.all([
+          listPapers(),
+          fetchDiskBackup(false).catch(() => undefined),
+        ]);
+        let current = stored;
+        if (!current.length) {
+          try {
+            const [legacyPapers, legacyWorkspaces] = await Promise.all([
+              legacyDb.listPapers(),
+              legacyDb.listWorkspaces(),
+            ]);
+            if (legacyPapers.length || legacyWorkspaces.length) {
+              const legacyBackup = await buildBackup(legacyPapers, legacyWorkspaces);
+              await importBackup(legacyBackup);
+              current = await listPapers();
+              if (!cancelled) {
+                setNotice(`已将旧版浏览器论文库迁移 ${current.length} 篇论文。`);
+              }
+            }
+          } catch {
+            // 旧版 IndexedDB 不存在或已清空时无需迁移
+          }
         }
-        const restoredPapers = backup ? backup.papers.map(backupToPaper) : [];
-        await replaceAll(restoredPapers, backup?.workspaces ?? []);
+        const settings = await getSettings().catch(() => ({}));
         if (cancelled) return;
-        setPapers(restoredPapers);
-        if (backup?.savedAt) setBackupSavedAt(backup.savedAt);
-        applyBackupSettings(backup?.settings);
-        if (restoredPapers.length || backup?.workspaces.length) {
-          setNotice(`已从本机磁盘备份恢复 ${restoredPapers.length} 篇论文和本地成果。`);
-        }
+        setPapers(current);
+        if (disk?.filePath) setBackupFilePath(disk.filePath);
+        if (disk?.savedAt) setBackupSavedAt(disk.savedAt);
+        applyBackupSettings(settings);
+        settingsLoadedRef.current = true;
       } catch {
+        settingsLoadedRef.current = true;
         if (!cancelled) setNotice("无法打开本地论文库。");
       }
     })();
@@ -441,23 +548,6 @@ export default function Home() {
       cancelled = true;
     };
   }, [applyBackupSettings]);
-
-  const hasBackupData =
-    papers.length > 0 ||
-    workspace.annotations.length > 0 ||
-    workspace.conversations.length > 0 ||
-    workspace.artifacts.length > 0;
-
-  useEffect(() => {
-    if (!hasBackupData) return;
-    scheduleBackup(1200);
-    return () => {
-      if (backupTimerRef.current !== undefined) {
-        window.clearTimeout(backupTimerRef.current);
-        backupTimerRef.current = undefined;
-      }
-    };
-  }, [hasBackupData, papers, scheduleBackup, workspace]);
 
   useEffect(() => {
     try {
@@ -475,26 +565,14 @@ export default function Home() {
     } catch {
       // localStorage 不可用时忽略主题持久化
     }
+    if (settingsLoadedRef.current) {
+      void saveSettings({ theme, layout: layoutRef.current }).catch(() =>
+        setNotice("界面设置保存失败。"),
+      );
+    }
   }, [theme]);
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(LAYOUT_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as {
-          leftWidth?: number;
-          rightWidth?: number;
-          leftCollapsed?: boolean;
-          rightCollapsed?: boolean;
-        };
-        if (typeof saved.leftWidth === "number") setLeftWidth(Math.min(420, Math.max(170, saved.leftWidth)));
-        if (typeof saved.rightWidth === "number") setRightWidth(Math.min(620, Math.max(300, saved.rightWidth)));
-        setLeftCollapsed(Boolean(saved.leftCollapsed));
-        setRightCollapsed(Boolean(saved.rightCollapsed));
-      }
-    } catch {
-      // 布局设置损坏时忽略
-    }
     const compactMedia = window.matchMedia("(max-width: 1060px)");
     const mobileMedia = window.matchMedia("(max-width: 820px)");
     const update = () => {
@@ -519,18 +597,38 @@ export default function Home() {
     } catch {
       // localStorage 不可用时忽略布局持久化
     }
+    if (settingsLoadedRef.current) {
+      void saveSettings({
+        theme: themeRef.current,
+        layout: { leftWidth, rightWidth, leftCollapsed, rightCollapsed },
+      }).catch(() => setNotice("界面设置保存失败。"));
+    }
   }, [leftWidth, rightWidth, leftCollapsed, rightCollapsed]);
 
   useEffect(() => {
+    saveWorkspaceDebouncer.flush();
+    setActiveAnchors([]);
+    setActiveConversationId(undefined);
+    setContextMode(false);
     if (!paper) {
       setWorkspace(blankWorkspace);
       return;
     }
-    setActiveAnchors([]);
-    setActiveConversationId(undefined);
     setPendingColor(defaultHighlightColor(0));
-    void getWorkspace(paper.id).then(setWorkspace).catch(() => setNotice("无法读取这篇论文的本地笔记。"));
-  }, [paper]);
+    setWorkspace(blankWorkspace);
+    void getWorkspace(paper.id)
+      .then((loaded) => {
+        if (paperIdRef.current === paper.id) setWorkspace(loaded);
+      })
+      .catch(() => setNotice("无法读取这篇论文的本地笔记。"));
+  }, [paper, saveWorkspaceDebouncer]);
+
+  useEffect(
+    () => () => {
+      saveWorkspaceDebouncer.flush();
+    },
+    [saveWorkspaceDebouncer],
+  );
 
   const onActiveSectionChange = useCallback((sectionId?: string) => {
     setActiveSectionId(sectionId);
@@ -542,17 +640,29 @@ export default function Home() {
     if (activeSelection) {
       return workspace.conversations.find(
         (conversation) =>
-          conversation.selection?.id === activeSelection.id ||
-          conversation.anchor?.id === activeSelection.anchors[0]?.id,
+          isNormalScope(conversation) &&
+          conversationMatchesSelection(conversation, activeSelection),
+      ) ?? workspace.conversations.find(
+        (conversation) => conversationMatchesSelection(conversation, activeSelection),
       );
     }
-    return workspace.conversations.find((conversation) => conversation.anchor?.id === activeAnchor?.id) ??
+    return workspace.conversations.find(
+      (conversation) =>
+        isNormalScope(conversation) &&
+        conversationMatchesSelection(conversation, undefined, activeAnchor),
+    ) ??
+      workspace.conversations.find(
+        (conversation) => conversationMatchesSelection(conversation, undefined, activeAnchor),
+      ) ??
+      workspace.conversations.find((conversation) => isNormalScope(conversation)) ??
       workspace.conversations.at(0);
-  }, [activeAnchor?.id, activeConversationId, activeSelection, workspace.conversations]);
+  }, [activeAnchor, activeConversationId, activeSelection, workspace.conversations]);
 
   function commitWorkspace(next: PaperWorkspace) {
     setWorkspace(next);
-    if (paper) void saveWorkspace(paper.id, next);
+    workspaceRef.current = next;
+    pendingWorkspaceRef.current = next;
+    if (paperIdRef.current) saveWorkspaceDebouncer.schedule();
   }
 
   function startResize(which: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) {
@@ -591,13 +701,14 @@ export default function Home() {
     }
     setUploadState("loading");
     setNotice(undefined);
+    await saveWorkspaceDebouncer.flush();
     try {
       const sourceHash = await blobSha256(file);
       const existing = await findPaperBySourceHash(sourceHash);
       if (existing) {
         setPapers((current) => {
           const others = current.filter((item) => item.id !== existing.id);
-          return [existing, ...others];
+          return [paperToMeta(existing), ...others];
         });
         setPaper(existing);
         setNotice(`《${existing.title}》已经在本机论文库中，已直接打开。`);
@@ -605,20 +716,41 @@ export default function Home() {
         return;
       }
       const parsed = await parsePdfFile(file);
+      const { metadataTitle, ...parsedPaper } = parsed;
+      const usableMetadataTitle = isWeakPaperTitle(metadataTitle)
+        ? undefined
+        : metadataTitle;
+      const firstPageBlocks = firstPageMetadataBlocks(parsed.pages);
+      const metadata = await lookupPaperMetadata({
+        title: file.name.replace(/\.pdf$/i, ""),
+        text: parsed.pages
+          .slice(0, 3)
+          .map((page) => page.text)
+          .join("\n"),
+        metadataTitle: usableMetadataTitle,
+        blocks: firstPageBlocks.blocks,
+        pageHeight: firstPageBlocks.pageHeight,
+      }).catch(() => ({} as PaperMetadataPatch));
       const now = new Date().toISOString();
-      const title = file.name.replace(/\.pdf$/i, "");
+      const title =
+        usableMetadataTitle?.trim() ||
+        metadata.title?.trim() ||
+        file.name.replace(/\.pdf$/i, "");
       const nextPaper: Paper = {
         id: uid(),
         title,
         fileName: file.name,
         file,
         sourceHash,
+        keywords: metadata.keywords?.length ? metadata.keywords : undefined,
+        journal: metadata.journal || undefined,
+        impactFactor: metadata.impactFactor || undefined,
         createdAt: now,
         updatedAt: now,
-        ...parsed,
+        ...parsedPaper,
       };
       await savePaper(nextPaper);
-      setPapers((current) => [nextPaper, ...current]);
+      setPapers((current) => [paperToMeta(nextPaper), ...current]);
       setPaper(nextPaper);
       setNotice(`已在本机保存《${title}》，共 ${parsed.pageCount} 页。`);
       setUploadState("idle");
@@ -638,15 +770,79 @@ export default function Home() {
     void handleFile(event.dataTransfer.files?.[0]);
   }
 
-  async function openPaper(item: Paper) {
-    setPaper(item);
-    if (item.originalReady) return;
-    setNotice("正在补齐这篇论文的原版排版数据…");
-    const repaired = await repairPaperOriginalMetadata(item);
-    setPaper(repaired);
-    setPapers((items) => items.map((entry) => (entry.id === repaired.id ? repaired : entry)));
-    await savePaper(repaired);
-    setNotice(repaired.originalReady ? "已补齐原版排版数据。" : "未读取到文本层，仍会显示原版页面。");
+  async function openPaper(item: PaperMeta) {
+    await saveWorkspaceDebouncer.flush();
+    const full = await getPaper(item.id);
+    if (!full) {
+      setPapers(await listPapers());
+      setPaper(undefined);
+      setNotice("这篇论文不存在或已被删除。");
+      return;
+    }
+    const fileNameBase = full.fileName.replace(/\.pdf$/i, "");
+    const titleIsFileName =
+      full.title === fileNameBase || full.title === full.fileName;
+    const titleNeedsLookup = titleIsFileName || isWeakPaperTitle(full.title);
+    const hasMetadata = Boolean(
+      full.keywords?.length || full.journal || full.impactFactor,
+    );
+    if (!hasMetadata || titleNeedsLookup || !full.originalReady) {
+      setBackfillingId(item.id);
+      setNotice("正在补齐这篇论文的元数据和排版数据…");
+    }
+    try {
+      const [metadata, repaired] = await Promise.all([
+        !hasMetadata || titleNeedsLookup
+          ? (() => {
+              const firstPageBlocks = firstPageMetadataBlocks(full.pages);
+              return lookupPaperMetadata({
+                title: full.title,
+                text: full.pages
+                  .slice(0, 3)
+                  .map((page) => page.text)
+                  .join("\n"),
+                blocks: firstPageBlocks.blocks,
+                pageHeight: firstPageBlocks.pageHeight,
+              }).catch(() => ({} as PaperMetadataPatch));
+            })()
+          : Promise.resolve({} as PaperMetadataPatch),
+        full.originalReady
+          ? Promise.resolve(full)
+          : repairPaperOriginalMetadata(full),
+      ]);
+      const nextTitle = titleNeedsLookup
+        ? metadata.title?.trim() || full.title
+        : full.title;
+      const enriched: Paper = {
+        ...repaired,
+        title: nextTitle,
+        keywords: metadata.keywords?.length ? metadata.keywords : repaired.keywords,
+        journal: metadata.journal || repaired.journal,
+        impactFactor: metadata.impactFactor || repaired.impactFactor,
+      };
+      const changed =
+        nextTitle !== full.title ||
+        !full.originalReady ||
+        Boolean(metadata.keywords?.length || metadata.journal || metadata.impactFactor);
+      setPaper(enriched);
+      if (changed) {
+        setPapers((items) =>
+          items.map((entry) =>
+            entry.id === enriched.id ? paperToMeta(enriched) : entry,
+          ),
+        );
+        await savePaper(enriched);
+      }
+      if (!enriched.originalReady) {
+        setNotice("未读取到文本层，仍会显示原版页面。");
+        return;
+      }
+      if (changed) setNotice("已补齐这篇论文的元数据。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "补齐论文信息失败，请稍后重试。");
+    } finally {
+      setBackfillingId(undefined);
+    }
   }
 
   function selectAnchor(anchor: TextAnchor, additive: boolean) {
@@ -661,9 +857,13 @@ export default function Home() {
     setActiveAnchors(nextAnchors);
     const existing =
       workspace.conversations.find(
-        (conversation) => conversation.selection?.id === nextSelection?.id,
+        (conversation) =>
+          isNormalScope(conversation) &&
+          conversationMatchesSelection(conversation, nextSelection, anchor),
       ) ??
-      workspace.conversations.find((conversation) => conversation.anchor?.id === anchor.id);
+      workspace.conversations.find((conversation) =>
+        conversationMatchesSelection(conversation, nextSelection, anchor),
+      );
     setActiveConversationId(existing?.id);
     setPendingColor(defaultHighlightColor(workspace.conversations.length));
     setRightView("chat");
@@ -717,19 +917,21 @@ export default function Home() {
     task: PromptKind | ArtifactKind,
     taskQuestion: string,
     context: string,
-    previousTurns: ChatTurn[] = [],
+    history: Array<{ role: "user" | "assistant"; content: string }> = [],
     onText: (content: string) => void,
   ) {
-    const response = await fetch("/api/deepseek/chat", {
+    const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
+    const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        apiKey,
+        provider: modelProvider,
+        apiKey: activeApiKey,
         mode,
         task,
         context,
         question: taskQuestion,
-        messages: previousTurns.slice(-10).map((turn) => ({ role: turn.role, content: turn.content })),
+        messages: history.slice(-10).map((message) => ({ role: message.role, content: message.content })),
       }),
     });
     if (!response.ok || !response.body) {
@@ -750,37 +952,67 @@ export default function Home() {
 
   async function sendQuestion(kind: PromptKind, forcedQuestion?: string) {
     if (!paper || generating) return;
-    if (!apiKey.trim()) {
+    const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
+    const providerLabel = modelProvider === "glm" ? "智谱 GLM" : "DeepSeek";
+    if (!activeApiKey.trim()) {
       setSettingsOpen(true);
-      setNotice("请先在设置中填写并验证你的 DeepSeek API Key。" );
+      setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
       return;
     }
-    const requestedQuestion = forcedQuestion?.trim() || question.trim() || (kind === "free" ? "请解释这段内容。" : promptLabels[kind]);
+    const requestedQuestion = forcedQuestion?.trim() || question.trim();
+    if (kind === "context" && !requestedQuestion) {
+      setNotice("请先在输入框里输入问题，再发送。");
+      return;
+    }
+    const finalQuestion = requestedQuestion || (kind === "free" ? "请解释这段内容。" : promptLabels[kind]);
     if (!activeAnchors.length && kind !== "free") {
       setNotice("先在原版页面上划选一段原文。" );
       return;
     }
     const now = new Date().toISOString();
-    const conversation = selectedConversation ?? {
+    const isContextRequest = kind === "context";
+    const activeById = workspace.conversations.find((conversation) => conversation.id === activeConversationId);
+    const baseConversation = isContextRequest
+      ? workspace.conversations.find(
+          (conversation) =>
+            conversation.scope === "context" &&
+            conversationMatchesSelection(conversation, activeSelection, activeAnchor),
+        )
+      : activeById && isNormalScope(activeById)
+        ? activeById
+        : workspace.conversations.find(
+            (conversation) =>
+              isNormalScope(conversation) &&
+              conversationMatchesSelection(conversation, activeSelection, activeAnchor),
+          );
+    const conversation = baseConversation ?? {
       id: uid(),
       paperId: paper.id,
       anchor: activeAnchor,
       selection: activeSelection,
+      scope: isContextRequest ? "context" : "normal",
       color: pendingColor ?? defaultHighlightColor(workspace.conversations.length),
-      title: activeSelection
-        ? activeSelection.anchors.length > 1
-          ? `${activeSelection.anchors.length} 个片段问答`
-          : `${activeSelection.anchors[0].section ?? `第 ${activeSelection.anchors[0].page} 页`}选段`
-        : "全文问答",
+      title: isContextRequest
+        ? activeSelection
+          ? activeSelection.anchors.length > 1
+            ? `全文上下文 · ${activeSelection.anchors.length} 个片段`
+            : `全文上下文 · ${activeSelection.anchors[0].section ?? `第 ${activeSelection.anchors[0].page} 页`}`
+          : "全文上下文"
+        : activeSelection
+          ? activeSelection.anchors.length > 1
+            ? `${activeSelection.anchors.length} 个片段问答`
+            : `${activeSelection.anchors[0].section ?? `第 ${activeSelection.anchors[0].page} 页`}选段`
+          : "全文问答",
       turns: [],
       updatedAt: now,
     };
     const userTurn: ChatTurn = {
       id: uid(),
       role: "user",
-      content: requestedQuestion,
+      content: finalQuestion,
       createdAt: now,
       mode,
+      provider: modelProvider,
       kind,
       anchor: activeAnchor,
       selection: activeSelection,
@@ -791,6 +1023,7 @@ export default function Home() {
       content: "",
       createdAt: now,
       mode,
+      provider: modelProvider,
       kind,
       anchor: activeAnchor,
       selection: activeSelection,
@@ -807,8 +1040,31 @@ export default function Home() {
     setPendingColor(defaultHighlightColor(workspace.conversations.length + 1));
     setQuestion("");
     setGenerating(true);
+    const selectedContext = buildContext(paper.pages, activeAnchors);
+    let historyMessages: Array<{ role: "user" | "assistant"; content: string }>;
+    let requestContext: string;
+    if (kind === "context") {
+      const hasContextTurn = conversation.turns.some(
+        (turn) => turn.role === "user" && turn.kind === "context",
+      );
+      if (hasContextTurn) {
+        historyMessages = buildContextHistoryMessages(conversation.turns, paperDigest);
+        requestContext = `[用户选中内容与相邻上下文]\n${selectedContext}`;
+      } else {
+        historyMessages = conversation.turns.map((turn) => ({ role: turn.role, content: turn.content }));
+        const digestPart = paperDigest.trim()
+          ? `[论文全文摘要与结构]\n${paperDigest}`
+          : "";
+        requestContext = [digestPart, `[用户选中内容与相邻上下文]\n${selectedContext}`]
+          .filter(Boolean)
+          .join("\n\n");
+      }
+    } else {
+      historyMessages = conversation.turns.map((turn) => ({ role: turn.role, content: turn.content }));
+      requestContext = selectedContext;
+    }
     try {
-      await streamResponse(kind, requestedQuestion, buildContext(paper.pages, activeAnchors), conversation.turns, (content) => {
+      await streamResponse(kind, finalQuestion, requestContext, historyMessages, (content) => {
         currentConversation = {
           ...currentConversation,
           turns: currentConversation.turns.map((turn) => (turn.id === assistantTurn.id ? { ...turn, content } : turn)),
@@ -831,9 +1087,11 @@ export default function Home() {
 
   async function generateArtifact(kind: ArtifactKind) {
     if (!paper || generating) return;
-    if (!apiKey.trim()) {
+    const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
+    const providerLabel = modelProvider === "glm" ? "智谱 GLM" : "DeepSeek";
+    if (!activeApiKey.trim()) {
       setSettingsOpen(true);
-      setNotice("请先在设置中填写并验证你的 DeepSeek API Key。" );
+      setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
       return;
     }
     setGenerating(true);
@@ -870,30 +1128,32 @@ export default function Home() {
     commitWorkspace({ ...workspace, artifacts: workspace.artifacts.map((item) => (item.id === next.id ? next : item)) });
   }
 
-  async function testKey() {
-    if (!apiKey.trim()) return;
-    setKeyState("testing");
+  async function testKey(provider: ModelProvider) {
+    const key = provider === "glm" ? glmApiKey : apiKey;
+    if (!key.trim()) return;
+    const setState = provider === "glm" ? setGlmKeyState : setKeyState;
+    setState("testing");
     try {
-      const response = await fetch("/api/deepseek/test", {
+      const response = await fetch("/api/test-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify({ provider, apiKey: key }),
       });
-      setKeyState(response.ok ? "valid" : "invalid");
+      setState(response.ok ? "valid" : "invalid");
     } catch {
-      setKeyState("invalid");
+      setState("invalid");
     }
   }
 
   async function removePaper(id: string) {
+    await saveWorkspaceDebouncer.flush();
     await deletePaper(id);
     setPapers((items) => items.filter((item) => item.id !== id));
     if (editingNotePaperId === id) setEditingNotePaperId(undefined);
     if (paper?.id === id) setPaper(undefined);
-    void writeBackupNow();
   }
 
-  function beginNoteEdit(item: Paper) {
+  function beginNoteEdit(item: PaperMeta) {
     setEditingNotePaperId(item.id);
     setNoteDraft(item.note ?? "");
   }
@@ -903,7 +1163,7 @@ export default function Home() {
     setNoteDraft("");
   }
 
-  async function saveNote(item: Paper) {
+  async function saveNote(item: PaperMeta) {
     const note = noteDraft.trim();
     setPapers((items) =>
       items.map((entry) => (entry.id === item.id ? { ...entry, note } : entry)),
@@ -961,25 +1221,56 @@ export default function Home() {
           <p className={`library-backup-status ${backupState === "error" ? "error" : ""}`}>
             <HardDrive size={12} />
             {backupState === "saving"
-              ? "正在写入本机磁盘…"
+              ? "正在生成完整 JSON…"
               : backupState === "restoring"
                 ? "正在从备份恢复…"
                 : backupState === "error"
-                  ? "本机备份失败，请检查磁盘"
+                  ? "完整 JSON 备份失败，请检查磁盘"
                   : backupSavedAt
-                    ? `本机磁盘自动备份 · ${readableDateTime(backupSavedAt)}`
-                    : "本机磁盘自动备份已开启"}
+                    ? `完整 JSON 已手动备份 · ${readableDateTime(backupSavedAt)}`
+                    : "数据库自动保存 · 完整 JSON 手动备份"}
           </p>
           {visiblePapers.length ? (
             <div className="library-grid">
               {visiblePapers.map((item) => (
-                <article className="paper-card" key={item.id}>
+                <article
+                  className={`paper-card${backfillingId === item.id ? " is-backfilling" : ""}`}
+                  key={item.id}
+                >
                   <button className="paper-card-open" onClick={() => void openPaper(item)}>
                     <span className="paper-icon"><FileText size={22} /></span>
                     <strong>{item.title}</strong>
                     <small>{item.pageCount} 页 · {readableDate(item.updatedAt)} 保存</small>
                     <ChevronRight size={17} />
                   </button>
+                  {backfillingId === item.id ? (
+                    <div className="paper-card-backfill" role="status">
+                      <LoaderCircle className="spin" size={14} />
+                      <span>正在补齐论文信息…</span>
+                    </div>
+                  ) : null}
+                  {item.journal || item.impactFactor || item.keywords?.length ? (
+                    <div className="paper-card-metadata">
+                      {item.journal || item.impactFactor ? (
+                        <div className="paper-card-facts">
+                          {item.journal ? <span>{item.journal}</span> : null}
+                          {item.impactFactor ? <span>影响因子 {item.impactFactor}</span> : null}
+                        </div>
+                      ) : null}
+                      {item.keywords?.length ? (
+                        <div className="paper-card-keywords" aria-label="关键词">
+                          {item.keywords.slice(0, 4).map((keyword, index) => (
+                            <span key={`${keyword}-${index}`}>{keyword}</span>
+                          ))}
+                          {item.keywords.length > 4 ? (
+                            <span className="paper-keyword-more">
+                              +{item.keywords.length - 4}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {editingNotePaperId === item.id ? (
                     <div className="paper-note-editor">
                       <textarea
@@ -1006,7 +1297,7 @@ export default function Home() {
           ) : papers.length ? (
             <p className="empty-library">没有匹配的论文，换个关键词试试。</p>
           ) : (
-            <p className="empty-library">还没有论文。首次导入后，文件和成果会保存到本机，并自动写入磁盘备份。</p>
+            <p className="empty-library">还没有论文。首次导入后，文件和成果自动保存到本机数据库。</p>
           )}
         </section>
         <SettingsSheet
@@ -1015,7 +1306,11 @@ export default function Home() {
           apiKey={apiKey}
           setApiKey={setApiKey}
           state={keyState}
-          onTest={() => void testKey()}
+          onTest={() => void testKey("deepseek")}
+          glmApiKey={glmApiKey}
+          setGlmApiKey={setGlmApiKey}
+          glmState={glmKeyState}
+          onTestGlm={() => void testKey("glm")}
           theme={theme}
           onThemeChange={setTheme}
           backupState={backupState}
@@ -1086,7 +1381,7 @@ export default function Home() {
             </div>
           </details>
           <SidebarQuote />
-          <div className="privacy-note"><CheckCircle2 size={15} /> PDF 和成果已开启本机磁盘自动备份</div>
+          <div className="privacy-note"><CheckCircle2 size={15} /> PDF 和成果保存在本机 SQLite，完整 JSON 由你手动导出</div>
         </aside>
         <PdfReader
           paper={paper}
@@ -1108,7 +1403,12 @@ export default function Home() {
         />
         <aside className={`assistant-panel ${rightCollapsed ? "collapsed" : ""}`}>
           <div className="assistant-topbar">
-            <ModelSwitch mode={mode} setMode={setMode} />
+            <ModelSwitch
+              mode={mode}
+              setMode={setMode}
+              provider={modelProvider}
+              setProvider={setModelProvider}
+            />
             <button className="panel-collapse" onClick={() => setRightCollapsed(true)} aria-label="折叠右侧" title="折叠右侧"><PanelRightClose size={15} /></button>
           </div>
           {rightView === "chat" ? (
@@ -1124,8 +1424,11 @@ export default function Home() {
               pendingColor={pendingColor}
               onPendingColorChange={setPendingColor}
               onChangeColor={changeConversationColor}
+              contextMode={contextMode}
+              onToggleContext={() => setContextMode((current) => !current)}
               onPrompt={(kind) => void sendQuestion(kind)}
               onSelectConversation={selectConversation}
+              provider={modelProvider}
             />
           ) : (
             <ArtifactPanel
@@ -1151,7 +1454,11 @@ export default function Home() {
         apiKey={apiKey}
         setApiKey={setApiKey}
         state={keyState}
-        onTest={() => void testKey()}
+        onTest={() => void testKey("deepseek")}
+        glmApiKey={glmApiKey}
+        setGlmApiKey={setGlmApiKey}
+        glmState={glmKeyState}
+        onTestGlm={() => void testKey("glm")}
         theme={theme}
         onThemeChange={setTheme}
         backupState={backupState}
@@ -1257,14 +1564,27 @@ function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: 
   );
 }
 
-function ModelSwitch({ mode, setMode }: { mode: ModelMode; setMode: (mode: ModelMode) => void }) {
-  return <div className="model-switch" role="group" aria-label="回答模式">
-    <button className={mode === "fast" ? "active" : ""} onClick={() => setMode("fast")}><span>快速</span><small>Flash</small></button>
-    <button className={mode === "deep" ? "active" : ""} onClick={() => setMode("deep")}><span>深度</span><small>MAX 思考</small></button>
-  </div>;
+function ModelSwitch({ mode, setMode, provider, setProvider }: {
+  mode: ModelMode;
+  setMode: (mode: ModelMode) => void;
+  provider: ModelProvider;
+  setProvider: (provider: ModelProvider) => void;
+}) {
+  return (
+    <div className="model-switch-stack">
+      <div className="model-switch" role="group" aria-label="回答模式">
+        <button className={mode === "fast" ? "active" : ""} onClick={() => setMode("fast")}><span>快速</span><small>Flash</small></button>
+        <button className={mode === "deep" ? "active" : ""} onClick={() => setMode("deep")}><span>深度</span><small>MAX 思考</small></button>
+      </div>
+      <div className="model-switch provider-switch" role="group" aria-label="模型服务商">
+        <button className={provider === "deepseek" ? "active" : ""} onClick={() => setProvider("deepseek")}><Zap size={12} /><span>DeepSeek</span><small>Flash</small></button>
+        <button className={provider === "glm" ? "active" : ""} onClick={() => setProvider("glm")}><Sparkles size={12} /><span>GLM 免费</span><small>4.7 Flash</small></button>
+      </div>
+    </div>
+  );
 }
 
-function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, onPrompt, onSelectConversation }: {
+function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, provider }: {
   anchors?: TextAnchor[];
   selectionGroup?: SelectionGroup;
   conversation?: Conversation;
@@ -1276,8 +1596,11 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   pendingColor: HighlightColor;
   onPendingColorChange: (color: HighlightColor) => void;
   onChangeColor: (conversation: Conversation, color: HighlightColor) => void;
+  contextMode: boolean;
+  onToggleContext: () => void;
   onPrompt: (kind: PromptKind) => void;
   onSelectConversation: (conversation: Conversation) => void;
+  provider: ModelProvider;
 }) {
   const historyRef = useRef<HTMLDivElement>(null);
   const [focusRequest, setFocusRequest] = useState<{ turnId: string; nonce: number }>();
@@ -1325,7 +1648,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   const colorMode = conversation ? "会话" : "下一次提问";
 
   return <div className="chat-panel">
-    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div></div>
+    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{provider === "glm" ? "GLM 4.7 Flash" : "DeepSeek Flash"}</span></div>
     <details className="question-index">
       <summary><MessageCircleMore size={14} /> 提问索引 <b>{indexItems.length}</b></summary>
       {indexItems.length ? (
@@ -1340,6 +1663,9 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
                 {item.turn.selection?.anchors.length
                   ? `p.${[...new Set(item.turn.selection.anchors.map((entry) => entry.page))].join("/")}`
                   : `p.${item.conversation.anchor?.page ?? "全"}`}
+                {item.turn.kind === "context" || item.conversation.scope === "context" ? (
+                  <span className="index-badge">全文</span>
+                ) : null}
               </span>
               <p>{item.turn.content}</p>
               <time>{readableDate(item.turn.createdAt)}</time>
@@ -1412,8 +1738,12 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
     </div>
     <div className="quick-prompts">
       <button disabled={generating} onClick={() => onPrompt("translate")}>翻译</button>
-      <button disabled={generating} onClick={() => onPrompt("context")}>结合上下文解释</button>
-      <button disabled={generating} onClick={() => onPrompt("concept")}>详细讲解</button>
+      <button
+        disabled={generating}
+        className={contextMode ? "active" : ""}
+        aria-pressed={contextMode}
+        onClick={onToggleContext}
+      >结合上下文解释</button>
     </div>
     <div className="chat-history" ref={historyRef} aria-live="polite">
       {conversation?.turns.length ? conversation.turns.map((turn) => (
@@ -1430,16 +1760,14 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
               ) : <LoaderCircle className="spin" size={15} />}
             </div>
           )}
-          {turn.role === "assistant" && turn.selection?.anchors.length ? (
-            <small>依据第 {[...new Set(turn.selection.anchors.map((entry) => entry.page))].join("、")} 页共 {turn.selection.anchors.length} 个片段</small>
-          ) : turn.anchor && turn.role === "assistant" ? (
-            <small>依据第 {turn.anchor.page} 页选段</small>
+          {turn.role === "assistant" ? (
+            <small>{turn.kind === "context" ? "全文上下文 · " : ""}{turn.selection?.anchors.length ? `依据第 ${[...new Set(turn.selection.anchors.map((entry) => entry.page))].join("、")} 页共 ${turn.selection.anchors.length} 个片段` : turn.anchor ? `依据第 ${turn.anchor.page} 页选段` : ""}</small>
           ) : null}
         </div>
       )) : <div className="chat-empty"><CircleHelp size={22} /><p>选中一句话，或提出关于整篇论文的问题。</p></div>}
     </div>
-    <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") onPrompt("free"); }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt("free")}><SendHorizonal size={17} /></button></div>
-    <p className="input-hint">⌘ / Ctrl + Enter 发送 · 回答优先依据论文原文</p>
+    <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") onPrompt(contextMode ? "context" : "free"); }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
+    <p className="input-hint">{contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "⌘ / Ctrl + Enter 发送 · 回答优先依据论文原文"}</p>
   </div>;
 }
 
@@ -1470,7 +1798,7 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit }
   };
   return <div className="artifact-panel">
     <div className="panel-heading"><span className="panel-icon"><Icon size={17} /></span><div><h2>{details.title}</h2><p>{details.description}</p></div></div>
-    {!artifact?.content && !generating ? <div className="artifact-empty"><Icon size={28} /><h3>从这篇论文开始提炼</h3><p>将使用全文文本进行深度分析，生成结果只保存在此浏览器。</p><button className="primary-action" onClick={onGenerate}><Sparkles size={16} /> 生成{details.title}</button></div> : <>
+    {!artifact?.content && !generating ? <div className="artifact-empty"><Icon size={28} /><h3>从这篇论文开始提炼</h3><p>将使用全文文本进行深度分析，生成结果自动保存到本机论文库。</p><button className="primary-action" onClick={onGenerate}><Sparkles size={16} /> 生成{details.title}</button></div> : <>
       <div className="artifact-actions">
         <button disabled={generating} onClick={onGenerate}>{generating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{generating ? "正在分析" : "重新生成"}</button>
         <button disabled={!artifact?.content} onClick={download}><Download size={15} /> 保存本地</button>
@@ -1492,13 +1820,17 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit }
   </div>;
 }
 
-function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath }: {
+function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApiKey, setGlmApiKey, glmState, onTestGlm, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath }: {
   open: boolean;
   onClose: () => void;
   apiKey: string;
   setApiKey: (value: string) => void;
   state: "idle" | "testing" | "valid" | "invalid";
   onTest: () => void;
+  glmApiKey: string;
+  setGlmApiKey: (value: string) => void;
+  glmState: "idle" | "testing" | "valid" | "invalid";
+  onTestGlm: () => void;
   theme: ThemeId;
   onThemeChange: (theme: ThemeId) => void;
   backupState: "idle" | "saving" | "saved" | "error" | "restoring";
@@ -1521,114 +1853,143 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, theme,
     }
   }
 
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="模型与主题设置">
-      <div className="settings-sheet">
+    <div
+      className="settings-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="模型与主题设置"
+      onClick={onClose}
+    >
+      <div className="settings-sheet" onClick={(event) => event.stopPropagation()}>
         <button className="close-sheet" onClick={onClose} aria-label="关闭设置"><X size={18} /></button>
-        <span className="settings-kicker">DEEPSEEK CONFIGURATION</span>
-        <h2>连接你的模型</h2>
-        <p>填写自己的 DeepSeek API Key。它只留在当前页面内存，每次调用后由代理立即丢弃，不会写入本地论文库。</p>
-        <label>DeepSeek API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-…" autoComplete="off" /></label>
-        <button className="test-key" disabled={!apiKey.trim() || state === "testing"} onClick={onTest}>{state === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{state === "testing" ? "验证中" : "验证连接"}</button>
-        {state === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
-        {state === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
-        <div className="settings-theme-section">
-          <span className="settings-kicker">READING THEME</span>
-          <h3>阅读主题</h3>
-          <div className="settings-theme-grid" role="radiogroup" aria-label="阅读主题">
-            {THEMES.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="radio"
-                aria-checked={theme === item.id}
-                className={`settings-theme-option ${theme === item.id ? "active" : ""}`}
-                onClick={() => onThemeChange(item.id)}
-              >
-                <span className="settings-theme-swatch" style={item.swatch} />
-                <span>
-                  <b>{item.name}</b>
-                  <small>{item.description}</small>
-                </span>
-                {theme === item.id && <Check size={13} className="theme-menu-check" />}
+        <div className="settings-scroll">
+          <span className="settings-kicker">MODEL PROVIDERS</span>
+          <h2>连接你的模型</h2>
+          <p>分别填写 DeepSeek 与智谱 GLM 的 API Key。它们只留在当前页面内存，不会写入本地论文库。</p>
+          <div className="settings-api-grid">
+            <section className="settings-api-card">
+              <div className="settings-api-title"><BrainCircuit size={17} /><div><b>DeepSeek</b><span>Flash 快速回复，可切换深度思考</span></div></div>
+              <label>DeepSeek API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (apiKey.trim()) onClose(); } }} placeholder="sk-…" autoComplete="off" /></label>
+              <button className="test-key" disabled={!apiKey.trim() || state === "testing"} onClick={onTest}>{state === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{state === "testing" ? "验证中" : "验证连接"}</button>
+              {state === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
+              {state === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
+            </section>
+            <section className="settings-api-card">
+              <div className="settings-api-title"><Sparkles size={17} /><div><b>智谱 GLM 4.7 Flash</b><span>免费模型，与 DeepSeek 独立切换</span></div></div>
+              <label>智谱 API Key<input type="password" value={glmApiKey} onChange={(event) => setGlmApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (glmApiKey.trim()) onClose(); } }} placeholder="智谱 API Key" autoComplete="off" /></label>
+              <button className="test-key" disabled={!glmApiKey.trim() || glmState === "testing"} onClick={onTestGlm}>{glmState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{glmState === "testing" ? "验证中" : "验证连接"}</button>
+              {glmState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
+              {glmState === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
+            </section>
+          </div>
+          <div className="settings-theme-section">
+            <span className="settings-kicker">READING THEME</span>
+            <h3>阅读主题</h3>
+            <div className="settings-theme-grid" role="radiogroup" aria-label="阅读主题">
+              {THEMES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === item.id}
+                  className={`settings-theme-option ${theme === item.id ? "active" : ""}`}
+                  onClick={() => onThemeChange(item.id)}
+                >
+                  <span className="settings-theme-swatch" style={item.swatch} />
+                  <span>
+                    <b>{item.name}</b>
+                    <small>{item.description}</small>
+                  </span>
+                  {theme === item.id && <Check size={13} className="theme-menu-check" />}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="settings-backup-section">
+            <span className="settings-kicker">LOCAL BACKUP</span>
+            <h3>完整 JSON 备份</h3>
+            <p className={`backup-status ${backupState === "error" ? "error" : ""}`}>
+              {backupState === "saving"
+                ? "正在生成完整 JSON…"
+                : backupState === "restoring"
+                  ? "正在从备份恢复…"
+                  : backupState === "error"
+                    ? "完整 JSON 备份失败，请检查磁盘"
+                    : backupSavedAt
+                      ? `最近手动备份 · ${readableDateTime(backupSavedAt)}`
+                      : "数据库自动保存；完整 JSON 手动导出、导入和立即备份"}
+            </p>
+            <div className="backup-path-row">
+              <span>备份文件</span>
+              <code title={backupFilePath}>{backupFilePath}</code>
+              <button type="button" className="backup-path-copy" onClick={() => void copyBackupPath()}>
+                <Copy size={13} />
+                复制路径
               </button>
-            ))}
+            </div>
+            <input
+              ref={backupFileInputRef}
+              className="sr-only"
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                if (file) onImportBackup(file);
+                event.currentTarget.value = "";
+              }}
+            />
+            <div className="backup-actions">
+              <button
+                type="button"
+                className="backup-action primary"
+                disabled={backupState === "saving" || backupState === "restoring"}
+                onClick={onBackupNow}
+              >
+                {backupState === "saving" ? <LoaderCircle className="spin" size={14} /> : <HardDrive size={14} />}
+                立即备份
+              </button>
+              <button
+                type="button"
+                className="backup-action"
+                disabled={backupState === "saving" || backupState === "restoring"}
+                onClick={onRestoreBackup}
+              >
+                <RefreshCw size={14} />
+                从备份恢复
+              </button>
+              <button
+                type="button"
+                className="backup-action"
+                disabled={backupState === "saving" || backupState === "restoring"}
+                onClick={onExportBackup}
+              >
+                <Download size={14} />
+                导出备份文件
+              </button>
+              <button
+                type="button"
+                className="backup-action"
+                disabled={backupState === "saving" || backupState === "restoring"}
+                onClick={() => backupFileInputRef.current?.click()}
+              >
+                <Upload size={14} />
+                导入备份
+              </button>
+            </div>
           </div>
+          <div className="mode-info"><div><b>快速 · Flash</b><span>翻译、基础问答</span></div><div><b>深度 · MAX 思考</b><span>解释、总结、写作分析</span></div><div><b>DeepSeek</b><span>独立 API Key</span></div><div><b>GLM 4.7 Flash</b><span>智谱免费模型</span></div></div>
         </div>
-        <div className="settings-backup-section">
-          <span className="settings-kicker">LOCAL BACKUP</span>
-          <h3>本机磁盘备份</h3>
-          <p className={`backup-status ${backupState === "error" ? "error" : ""}`}>
-            {backupState === "saving"
-              ? "正在写入本机磁盘…"
-              : backupState === "restoring"
-                ? "正在从备份恢复…"
-                : backupState === "error"
-                  ? "备份失败，请检查磁盘"
-                  : backupSavedAt
-                    ? `已自动备份 · ${readableDateTime(backupSavedAt)}`
-                    : "自动备份已开启"}
-          </p>
-          <div className="backup-path-row">
-            <span>备份文件</span>
-            <code title={backupFilePath}>{backupFilePath}</code>
-            <button type="button" className="backup-path-copy" onClick={() => void copyBackupPath()}>
-              <Copy size={13} />
-              复制路径
-            </button>
-          </div>
-          <input
-            ref={backupFileInputRef}
-            className="sr-only"
-            type="file"
-            accept=".json,application/json"
-            onChange={(event) => {
-              const file = event.currentTarget.files?.[0];
-              if (file) onImportBackup(file);
-              event.currentTarget.value = "";
-            }}
-          />
-          <div className="backup-actions">
-            <button
-              type="button"
-              className="backup-action primary"
-              disabled={backupState === "saving" || backupState === "restoring"}
-              onClick={onBackupNow}
-            >
-              {backupState === "saving" ? <LoaderCircle className="spin" size={14} /> : <HardDrive size={14} />}
-              立即备份
-            </button>
-            <button
-              type="button"
-              className="backup-action"
-              disabled={backupState === "saving" || backupState === "restoring"}
-              onClick={onRestoreBackup}
-            >
-              <RefreshCw size={14} />
-              从备份恢复
-            </button>
-            <button
-              type="button"
-              className="backup-action"
-              disabled={backupState === "saving" || backupState === "restoring"}
-              onClick={onExportBackup}
-            >
-              <Download size={14} />
-              导出备份文件
-            </button>
-            <button
-              type="button"
-              className="backup-action"
-              disabled={backupState === "saving" || backupState === "restoring"}
-              onClick={() => backupFileInputRef.current?.click()}
-            >
-              <Upload size={14} />
-              导入备份
-            </button>
-          </div>
-        </div>
-        <div className="mode-info"><div><b>快速 · Flash</b><span>翻译、基础问答</span></div><div><b>深度 · MAX 思考</b><span>解释、总结、写作分析</span></div></div>
       </div>
     </div>
   );

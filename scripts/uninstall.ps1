@@ -3,7 +3,8 @@
 param(
     [string]$AppDataDir = "",
     [switch]$RemoveGenerated,
-    [switch]$RemoveAllData
+    [switch]$RemoveAllData,
+    [switch]$SkipRegistry
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,7 +51,9 @@ if ($hasConfig) {
 }
 
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaperMate"
-Remove-Item -LiteralPath $regPath -Recurse -Force -ErrorAction SilentlyContinue
+if (-not $SkipRegistry) {
+    Remove-Item -LiteralPath $regPath -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $oldLocation = Get-Location
 Set-Location -LiteralPath $env:TEMP
@@ -64,7 +67,12 @@ finally {
     Set-Location -LiteralPath $oldLocation
 }
 
-Write-Host "快捷方式、启动器和 Windows 应用列表项已移除。" -ForegroundColor Green
+if ($SkipRegistry) {
+    Write-Host "快捷方式和启动器已移除（跳过 Windows 应用列表清理）。" -ForegroundColor Green
+}
+else {
+    Write-Host "快捷方式、启动器和 Windows 应用列表项已移除。" -ForegroundColor Green
+}
 
 $projectDir = ""
 $installedCopy = $false

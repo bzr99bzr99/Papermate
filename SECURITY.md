@@ -25,4 +25,5 @@ Do not create a public issue that exposes an API key, private PDF, or personal d
 
 - The DeepSeek API key is kept in page memory and is sent only from the browser to the local Next.js API route for the current request.
 - The original PDF is never uploaded; only the text fragments needed for a task are sent to the model provider.
-- Backups under `data/` contain local paper data and should not be committed to the repository. They are already ignored by `.gitignore`.
+- The SQLite database and backups under `data/` contain local paper data and should not be committed to the repository. They are already ignored by `.gitignore`.
+- Complete JSON backups are written only when you use the backup, export, or restore actions.

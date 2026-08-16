@@ -1,49 +1,93 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { emptyBackup, isBackup } from "@/lib/backup";
+import { emptyBackup, isBackup, type PaperMateBackup } from "@/lib/backup";
+import { getDefaultStorage, writeBackupFile } from "@/lib/storage";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const backupDirectory = () => path.join(process.cwd(), "data");
-const backupFile = () => path.join(backupDirectory(), "papermate-backup.json");
+const backupFile = () => path.join(process.cwd(), "data", "papermate-backup.json");
 
 const noStore = { "Cache-Control": "no-store" };
 
-export async function GET() {
+export async function GET(request: Request) {
+  const full = new URL(request.url).searchParams.get("full") === "1";
   try {
+    if (!existsSync(backupFile())) {
+      return NextResponse.json(
+        { ok: false, filePath: backupFile(), error: "本机备份文件不存在。" },
+        { status: 404, headers: noStore },
+      );
+    }
     const raw = await readFile(backupFile(), "utf8");
     const parsed = JSON.parse(raw) as unknown;
     if (!isBackup(parsed)) {
       return NextResponse.json(
-        { ok: false, filePath: backupFile(), ...emptyBackup() },
+        { ok: false, filePath: backupFile(), error: "本机备份文件已损坏。" },
         { status: 500, headers: noStore },
       );
     }
-    return NextResponse.json({ ok: true, filePath: backupFile(), ...parsed }, { headers: noStore });
+    if (full) {
+      return NextResponse.json(
+        { ok: true, filePath: backupFile(), ...parsed },
+        { headers: noStore },
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        filePath: backupFile(),
+        savedAt: parsed.savedAt,
+        paperCount: parsed.papers.length,
+        workspaceCount: parsed.workspaces.length,
+      },
+      { headers: noStore },
+    );
   } catch {
-    return NextResponse.json({ ok: true, filePath: backupFile(), ...emptyBackup() }, { headers: noStore });
+    const empty = emptyBackup();
+    if (full) {
+      return NextResponse.json(
+        { ok: true, filePath: backupFile(), ...empty },
+        { headers: noStore },
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        filePath: backupFile(),
+        savedAt: undefined,
+        paperCount: 0,
+        workspaceCount: 0,
+      },
+      { headers: noStore },
+    );
   }
 }
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as unknown;
-    if (!isBackup(body)) {
-      return NextResponse.json({ error: "备份格式无效。" }, { status: 400, headers: noStore });
+    const text = await request.text();
+    let backup: PaperMateBackup;
+    if (text.trim()) {
+      const parsed = JSON.parse(text) as unknown;
+      if (!isBackup(parsed)) {
+        return NextResponse.json(
+          { error: "备份格式无效。" },
+          { status: 400, headers: noStore },
+        );
+      }
+      backup = parsed;
+    } else {
+      backup = getDefaultStorage().buildBackup();
     }
-    const directory = backupDirectory();
-    await mkdir(directory, { recursive: true });
     const savedAt = new Date().toISOString();
-    const tempFile = path.join(directory, `papermate-backup.${Date.now()}.tmp`);
-    await writeFile(tempFile, JSON.stringify({ ...body, savedAt }), "utf8");
-    try {
-      await rename(tempFile, backupFile());
-    } catch {
-      await rm(backupFile(), { force: true });
-      await rename(tempFile, backupFile());
-    }
-    return NextResponse.json({ ok: true, savedAt, filePath: backupFile() }, { headers: noStore });
+    writeBackupFile({ ...backup, savedAt }, backupFile());
+    return NextResponse.json(
+      { ok: true, savedAt, filePath: backupFile() },
+      { headers: noStore },
+    );
   } catch {
     return NextResponse.json(
       { error: "无法写入本机备份，请检查磁盘空间或读写权限。" },

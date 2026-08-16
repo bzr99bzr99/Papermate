@@ -66,7 +66,12 @@ async function getPdfJs() {
   return pdfjsPromise;
 }
 
-type ParsedPdf = Pick<Paper, "pages" | "pageCount" | "outline" | "originalReady">;
+type ParsedPdf = Pick<
+  Paper,
+  "pages" | "pageCount" | "outline" | "originalReady"
+> & {
+  metadataTitle?: string;
+};
 
 function buildTextItems(
   items: Array<{
@@ -109,6 +114,12 @@ async function buildParsedPages(file: File): Promise<Omit<ParsedPdf, "originalRe
   const document = await pdfjs.getDocument({ data: buffer }).promise;
   const pageCount = document.numPages;
   const pages: ParsedPage[] = [];
+  const metadata = await document.getMetadata().catch(() => undefined);
+  const metadataInfo = metadata?.info as { Title?: unknown } | undefined;
+  const metadataTitle =
+    typeof metadataInfo?.Title === "string" && metadataInfo.Title.trim()
+      ? metadataInfo.Title.trim()
+      : undefined;
 
   try {
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
@@ -139,7 +150,7 @@ async function buildParsedPages(file: File): Promise<Omit<ParsedPdf, "originalRe
     if (!pages.some((entry) => entry.text.trim())) {
       throw new Error("没有读取到可选择的文本。本版本仅支持带文本层的 PDF，不支持扫描件 OCR。");
     }
-    return { pages, pageCount, outline };
+    return { pages, pageCount, outline, metadataTitle };
   } finally {
     document.destroy();
   }
@@ -160,12 +171,13 @@ async function buildOutline(document: PdfJsDocument, pages: ParsedPage[]): Promi
 }
 
 export async function parsePdfFile(file: File): Promise<ParsedPdf> {
-  const { pages, pageCount, outline } = await buildParsedPages(file);
+  const { pages, pageCount, outline, metadataTitle } = await buildParsedPages(file);
   return {
     pages,
     pageCount,
     outline,
     originalReady: pages.every((page) => Boolean(page.textItems?.length)),
+    metadataTitle,
   };
 }
 
@@ -2409,8 +2421,9 @@ function HighlightPopover({
     const items: Array<{ conversation: Conversation; turn: ChatTurn }> = [];
     for (const conversation of relatedConversations) {
       for (const turn of [...conversation.turns].reverse()) {
-        if (turn.role !== "user" || seen.has(turn.content)) continue;
-        seen.add(turn.content);
+        const dedupeKey = `${turn.kind ?? "normal"}:${conversation.scope ?? "normal"}:${turn.content}`;
+        if (turn.role !== "user" || seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
         items.push({ conversation, turn });
       }
     }
@@ -2542,7 +2555,12 @@ function HighlightPopover({
                   onClick={() => onSelectConversation?.(conversation)}
                 >
                   <span className={`highlight-color-dot highlight-color-dot-${color}`} aria-hidden="true" />
-                  <span className="highlight-popover-page">p.{page}</span>
+                  <span className="highlight-popover-page">
+                    p.{page}
+                    {conversation.scope === "context" || item.turn.kind === "context" ? (
+                      <span className="index-badge">全文</span>
+                    ) : null}
+                  </span>
                   <span className="highlight-popover-question">
                     {formatAnchorExcerpt(item.turn.content, 36, 18)}
                   </span>
