@@ -2,6 +2,14 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [2.1.0] - 2026-08-16
+
+### Changed
+
+- Unified settings panel: model provider API keys with connection tests (DeepSeek and Zhipu GLM), reading themes, and complete JSON backup management now live in a single two-column settings sheet with a header and a Done button; header buttons were renamed from "模型设置"/"API 设置" to "设置".
+- Settings panel restyled: wider sheet, sectioned blocks, stable close button, and a two-column main/side layout.
+- README (Chinese and English) rewritten as a detailed formal-release introduction covering the current feature set, with the settings screenshots merged into a single `设置.png`.
+
 ## [2.0.0] - 2026-08-16
 
 ### Added

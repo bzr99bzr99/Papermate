@@ -1448,7 +1448,7 @@ export default function Home() {
           <Brand />
           <div className="header-actions">
             <ThemeSwitcher theme={theme} onChange={setTheme} />
-            <button className="settings-trigger" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /> 模型设置</button>
+            <button className="settings-trigger" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /> 设置</button>
           </div>
         </header>
         <section className="hero">
@@ -1643,7 +1643,7 @@ export default function Home() {
         <div className="header-actions">
           {notice && <span className="compact-notice">{notice}</span>}
           <ThemeSwitcher theme={theme} onChange={setTheme} />
-          <button className="settings-trigger" onClick={() => setSettingsOpen(true)}><Settings2 size={16} /> API 设置</button>
+          <button className="settings-trigger" onClick={() => setSettingsOpen(true)}><Settings2 size={16} /> 设置</button>
         </div>
       </header>
       <div
@@ -2206,127 +2206,145 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
       className="settings-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="模型与主题设置"
+      aria-label="设置"
       onClick={onClose}
     >
       <div className="settings-sheet" onClick={(event) => event.stopPropagation()}>
         <button className="close-sheet" onClick={onClose} aria-label="关闭设置"><X size={18} /></button>
         <div className="settings-scroll">
-          <span className="settings-kicker">MODEL PROVIDERS</span>
-          <h2>连接你的模型</h2>
-          <p>分别填写 DeepSeek 与智谱 GLM 的 API Key。它们只留在当前页面内存，不会写入本地论文库。</p>
-          <div className="settings-api-grid">
-            <section className="settings-api-card">
-              <div className="settings-api-title"><BrainCircuit size={17} /><div><b>DeepSeek</b><span>Flash 快速回复，可切换深度思考</span></div></div>
-              <label>DeepSeek API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (apiKey.trim()) onClose(); } }} placeholder="sk-…" autoComplete="off" /></label>
-              <button className="test-key" disabled={!apiKey.trim() || state === "testing"} onClick={onTest}>{state === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{state === "testing" ? "验证中" : "验证连接"}</button>
-              {state === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
-              {state === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
-            </section>
-            <section className="settings-api-card">
-              <div className="settings-api-title"><Sparkles size={17} /><div><b>智谱 GLM 4.7 Flash</b><span>免费模型，与 DeepSeek 独立切换</span></div></div>
-              <label>智谱 API Key<input type="password" value={glmApiKey} onChange={(event) => setGlmApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (glmApiKey.trim()) onClose(); } }} placeholder="智谱 API Key" autoComplete="off" /></label>
-              <button className="test-key" disabled={!glmApiKey.trim() || glmState === "testing"} onClick={onTestGlm}>{glmState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{glmState === "testing" ? "验证中" : "验证连接"}</button>
-              {glmState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
-              {glmState === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
-            </section>
-          </div>
-          <div className="settings-theme-section">
-            <span className="settings-kicker">READING THEME</span>
-            <h3>阅读主题</h3>
-            <div className="settings-theme-grid" role="radiogroup" aria-label="阅读主题">
-              {THEMES.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === item.id}
-                  className={`settings-theme-option ${theme === item.id ? "active" : ""}`}
-                  onClick={() => onThemeChange(item.id)}
-                >
-                  <span className="settings-theme-swatch" style={item.swatch} />
-                  <span>
-                    <b>{item.name}</b>
-                    <small>{item.description}</small>
-                  </span>
-                  {theme === item.id && <Check size={13} className="theme-menu-check" />}
-                </button>
-              ))}
+          <div className="settings-header">
+            <div>
+              <span className="settings-kicker">SETTINGS</span>
+              <h2>设置</h2>
+              <p>模型连接、阅读主题与本机备份，统一在这里管理。</p>
             </div>
+            <button type="button" className="settings-done" onClick={onClose}><Check size={15} /> 完成</button>
           </div>
-          <div className="settings-backup-section">
-            <span className="settings-kicker">LOCAL BACKUP</span>
-            <h3>完整 JSON 备份</h3>
-            <p className={`backup-status ${backupState === "error" ? "error" : ""}`}>
-              {backupState === "saving"
-                ? "正在生成完整 JSON…"
-                : backupState === "restoring"
-                  ? "正在从备份恢复…"
-                  : backupState === "error"
-                    ? "完整 JSON 备份失败，请检查磁盘"
-                    : backupSavedAt
-                      ? `最近手动备份 · ${readableDateTime(backupSavedAt)}`
-                      : "数据库自动保存；完整 JSON 手动导出、导入和立即备份"}
-            </p>
-            <div className="backup-path-row">
-              <span>备份文件</span>
-              <code title={backupFilePath}>{backupFilePath}</code>
-              <button type="button" className="backup-path-copy" onClick={() => void copyBackupPath()}>
-                <Copy size={13} />
-                复制路径
-              </button>
+          <div className="settings-layout">
+            <div className="settings-layout-main">
+              <section className="settings-block">
+                <div className="settings-block-head">
+                  <span className="settings-kicker">MODEL PROVIDERS</span>
+                  <h3>模型连接</h3>
+                  <p>API Key 只保留在当前页面内存，不会写入本地论文库。</p>
+                </div>
+                <div className="settings-api-grid">
+                  <section className="settings-api-card">
+                    <div className="settings-api-title"><BrainCircuit size={17} /><div><b>DeepSeek</b><span>Flash 快速回复，可切换深度思考</span></div></div>
+                    <label>DeepSeek API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (apiKey.trim()) onClose(); } }} placeholder="sk-…" autoComplete="off" /></label>
+                    <button className="test-key" disabled={!apiKey.trim() || state === "testing"} onClick={onTest}>{state === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{state === "testing" ? "验证中" : "验证连接"}</button>
+                    {state === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
+                    {state === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
+                  </section>
+                  <section className="settings-api-card">
+                    <div className="settings-api-title"><Sparkles size={17} /><div><b>智谱 GLM 4.7 Flash</b><span>免费模型，与 DeepSeek 独立切换</span></div></div>
+                    <label>智谱 API Key<input type="password" value={glmApiKey} onChange={(event) => setGlmApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (glmApiKey.trim()) onClose(); } }} placeholder="智谱 API Key" autoComplete="off" /></label>
+                    <button className="test-key" disabled={!glmApiKey.trim() || glmState === "testing"} onClick={onTestGlm}>{glmState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{glmState === "testing" ? "验证中" : "验证连接"}</button>
+                    {glmState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
+                    {glmState === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
+                  </section>
+                </div>
+              </section>
+              <section className="settings-theme-section">
+                <span className="settings-kicker">READING THEME</span>
+                <h3>阅读主题</h3>
+                <div className="settings-theme-grid" role="radiogroup" aria-label="阅读主题">
+                  {THEMES.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={theme === item.id}
+                      className={`settings-theme-option ${theme === item.id ? "active" : ""}`}
+                      onClick={() => onThemeChange(item.id)}
+                    >
+                      <span className="settings-theme-swatch" style={item.swatch} />
+                      <span>
+                        <b>{item.name}</b>
+                        <small>{item.description}</small>
+                      </span>
+                      {theme === item.id && <Check size={13} className="theme-menu-check" />}
+                    </button>
+                  ))}
+                </div>
+              </section>
             </div>
-            <input
-              ref={backupFileInputRef}
-              className="sr-only"
-              type="file"
-              accept=".json,application/json"
-              onChange={(event) => {
-                const file = event.currentTarget.files?.[0];
-                if (file) onImportBackup(file);
-                event.currentTarget.value = "";
-              }}
-            />
-            <div className="backup-actions">
-              <button
-                type="button"
-                className="backup-action primary"
-                disabled={backupState === "saving" || backupState === "restoring"}
-                onClick={onBackupNow}
-              >
-                {backupState === "saving" ? <LoaderCircle className="spin" size={14} /> : <HardDrive size={14} />}
-                立即备份
-              </button>
-              <button
-                type="button"
-                className="backup-action"
-                disabled={backupState === "saving" || backupState === "restoring"}
-                onClick={onRestoreBackup}
-              >
-                <RefreshCw size={14} />
-                从备份恢复
-              </button>
-              <button
-                type="button"
-                className="backup-action"
-                disabled={backupState === "saving" || backupState === "restoring"}
-                onClick={onExportBackup}
-              >
-                <Download size={14} />
-                导出备份文件
-              </button>
-              <button
-                type="button"
-                className="backup-action"
-                disabled={backupState === "saving" || backupState === "restoring"}
-                onClick={() => backupFileInputRef.current?.click()}
-              >
-                <Upload size={14} />
-                导入备份
-              </button>
-            </div>
+            <aside className="settings-layout-side">
+              <section className="settings-backup-section">
+                <span className="settings-kicker">LOCAL BACKUP</span>
+                <h3>完整 JSON 备份</h3>
+                <p className={`backup-status ${backupState === "error" ? "error" : ""}`}>
+                  {backupState === "saving"
+                    ? "正在生成完整 JSON…"
+                    : backupState === "restoring"
+                      ? "正在从备份恢复…"
+                      : backupState === "error"
+                        ? "完整 JSON 备份失败，请检查磁盘"
+                        : backupSavedAt
+                          ? `最近手动备份 · ${readableDateTime(backupSavedAt)}`
+                          : "数据库自动保存；完整 JSON 手动导出、导入和立即备份"}
+                </p>
+                <div className="backup-path-row">
+                  <span>备份文件</span>
+                  <code title={backupFilePath}>{backupFilePath}</code>
+                  <button type="button" className="backup-path-copy" onClick={() => void copyBackupPath()}>
+                    <Copy size={13} />
+                    复制路径
+                  </button>
+                </div>
+                <input
+                  ref={backupFileInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    if (file) onImportBackup(file);
+                    event.currentTarget.value = "";
+                  }}
+                />
+                <div className="backup-actions">
+                  <button
+                    type="button"
+                    className="backup-action primary"
+                    disabled={backupState === "saving" || backupState === "restoring"}
+                    onClick={onBackupNow}
+                  >
+                    {backupState === "saving" ? <LoaderCircle className="spin" size={14} /> : <HardDrive size={14} />}
+                    立即备份
+                  </button>
+                  <button
+                    type="button"
+                    className="backup-action"
+                    disabled={backupState === "saving" || backupState === "restoring"}
+                    onClick={onRestoreBackup}
+                  >
+                    <RefreshCw size={14} />
+                    从备份恢复
+                  </button>
+                  <button
+                    type="button"
+                    className="backup-action"
+                    disabled={backupState === "saving" || backupState === "restoring"}
+                    onClick={onExportBackup}
+                  >
+                    <Download size={14} />
+                    导出备份文件
+                  </button>
+                  <button
+                    type="button"
+                    className="backup-action"
+                    disabled={backupState === "saving" || backupState === "restoring"}
+                    onClick={() => backupFileInputRef.current?.click()}
+                  >
+                    <Upload size={14} />
+                    导入备份
+                  </button>
+                </div>
+              </section>
+              <div className="mode-info"><div><b>快速 · Flash</b><span>翻译、基础问答</span></div><div><b>深度 · MAX 思考</b><span>解释、总结、写作分析</span></div><div><b>DeepSeek</b><span>独立 API Key</span></div><div><b>GLM 4.7 Flash</b><span>智谱免费模型</span></div></div>
+            </aside>
           </div>
-          <div className="mode-info"><div><b>快速 · Flash</b><span>翻译、基础问答</span></div><div><b>深度 · MAX 思考</b><span>解释、总结、写作分析</span></div><div><b>DeepSeek</b><span>独立 API Key</span></div><div><b>GLM 4.7 Flash</b><span>智谱免费模型</span></div></div>
         </div>
       </div>
     </div>

@@ -74,7 +74,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, click **模型设置 / Model settings**, enter your DeepSeek or Zhipu GLM API key, and verify the connection.
+Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek or Zhipu GLM API key, and verify the connection.
 
 ## Windows One-Click Install
 
@@ -84,7 +84,7 @@ Open `http://localhost:3000`, click **模型设置 / Model settings**, enter you
 
 ## Usage
 
-1. Open **模型设置 / Model settings**, choose DeepSeek or Zhipu GLM, enter the API key, and verify the connection.
+1. Open **设置 / Settings**, choose DeepSeek or Zhipu GLM, enter the API key, and verify the connection.
 2. Drag a searchable PDF into the app, or click to choose a file.
 3. Read the original pages, zoom/pan as needed, and select a passage.
 4. Hold `Ctrl`/`Cmd` to add more fragments, then ask a question, translate the selection, or toggle **结合上下文解释**.
@@ -98,8 +98,7 @@ Open `http://localhost:3000`, click **模型设置 / Model settings**, enter you
 | ![Library home](截图/首页.png) | Paper library: import PDFs, search papers, view metadata and notes, drag/pin papers, and check backup status. |
 | ![Reading and selection](截图/辅助阅读.png) | Original-page reader with a transparent text layer, zoom/pan, chapter outline, and clickable citation/figure links. |
 | ![Translation and chat](截图/辅助阅读翻译.png) | Translate or explain the selected passage, then continue with multi-turn questions; answers reference source pages. |
-| ![API settings 1](截图/api设置1.png) | Model provider settings: enter and verify DeepSeek or Zhipu GLM API keys. |
-| ![API settings 2](截图/api设置2.png) | The rest of the settings panel: reading themes and complete JSON backup management. |
+| ![Settings](截图/设置.png) | Unified settings panel: model providers and API key verification, reading themes, and complete JSON backup management. |
 | ![Theme selection](截图/皮肤选择.png) | Switch reading themes from the header; the choice is saved locally. |
 | ![Reading notes](截图/阅读笔记.png) | Generated reading notes with page-referenced evidence, glossary, and transferable insights. |
 | ![Mind map](截图/论文脑图.png) | Collapsible argument-structure mind map, exportable as SVG. |
