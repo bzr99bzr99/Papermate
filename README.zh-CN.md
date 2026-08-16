@@ -16,13 +16,13 @@ English introduction: [README.md](README.md). Windows 一键安装详见 [安装
 - **两种模型模式**：`Flash` 适合翻译和普通问答；`MAX 思考` 适合解释、总结和写作分析。
 - **结构化阅读成果**：生成 Markdown 阅读笔记、可折叠论文脑图和写作策略分析，支持数学公式渲染。
 - **本地优先存储**：PDF、高亮、对话、笔记和生成内容保存在本机 SQLite 数据库 `data/papermate.db`；完整 JSON 备份由你手动生成。
-- **Windows 一键安装**：自带安装、升级和卸载脚本，自动安装依赖、构建正式版本、创建快捷方式，并能在检测到旧安装时保留数据升级。
+- **Windows 一键安装/升级/卸载**：没有旧版本时选择位置全新安装；检测到旧版本时直接覆盖安装并保留 `data` 数据；另提供一键升级脚本，用当前源码直接更新已安装版本。
 
 ## 环境要求
 
 - Node.js 22.5 或更高版本（建议 Node.js LTS）
 - npm
-- DeepSeek API Key，用于模型请求
+- DeepSeek API Key 或智谱 GLM API Key（后者免费），用于模型请求，任选其一
 - 一键安装脚本需要 Windows 10/11；手动开发可在任意支持 Node.js 与 Next.js 的系统上运行
 
 ## 快速开始
@@ -32,13 +32,14 @@ npm install
 npm run dev
 ```
 
-打开 `http://localhost:3000`，点击“模型设置”，输入自己的 DeepSeek API Key 并验证连接。
+打开 `http://localhost:3000`，点击“模型设置”，输入 DeepSeek 或智谱 GLM 的 API Key 并验证连接。
 
 ## Windows 一键安装
 
-双击 `一键安装.bat`。如果电脑上还没有安装 PaperMate，会先让你选择安装位置，然后复制项目、安装依赖、构建正式版本并创建快捷方式。如果检测到 `%LOCALAPPDATA%\PaperMate\config.json` 中的已安装版本，安装器会自动升级该安装并保留 `data` 数据文件夹。
-
-项目根目录还提供 `一键升级.bat`，可以直接用当前项目源码升级已安装版本，不需要重新选择安装位置。卸载时可以从开始菜单、安装目录或 Windows 设置进入。详细步骤见 [安装说明.md](安装说明.md) 和 [INSTALL.md](INSTALL.md)。
+- **全新安装（无旧版本）**：双击 `一键安装.bat`，选择安装位置，安装器自动复制项目、安装依赖、构建正式版本并创建快捷方式。
+- **覆盖安装（有旧版本）**：再次双击 `一键安装.bat`，检测到 `%LOCALAPPDATA%\PaperMate\config.json` 中的已安装版本后，直接覆盖安装新版并保留 `data` 数据文件夹，无需重新选择安装位置。
+- **一键升级**：项目根目录提供 `一键升级.bat`，直接用当前项目源码升级已安装版本，同样保留数据、不需要重新选择安装位置。
+- 卸载可以从开始菜单、安装目录或 Windows 设置进入。详细步骤见 [安装说明.md](安装说明.md) 和 [INSTALL.md](INSTALL.md)。
 
 ## 使用方式
 
@@ -55,7 +56,7 @@ npm run dev
 | ![论文库首页](截图/首页.png) | 论文库：拖入 PDF、搜索论文、查看本机磁盘备份状态。 |
 | ![辅助阅读](截图/辅助阅读.png) | 原版页面阅读器，透明文本层支持精确划选段落。 |
 | ![问答](截图/问答.png) | 当前选区与多轮问答，支持翻译、结合上下文解释、详细讲解等快捷指令。 |
-| ![设置](截图/设置.png) | 模型设置、DeepSeek API Key 验证、界面主题与本机备份管理。 |
+| ![设置](截图/设置.png) | 模型设置、提供方与 API Key 验证、界面主题与本机备份管理。 |
 | ![阅读笔记](截图/阅读笔记.png) | 生成阅读笔记，关键结论标注原文页码与证据。 |
 | ![论文脑图](截图/论文脑图.png) | 生成可折叠的论文论证结构脑图。 |
 | ![写作思路](截图/写作思路.png) | 生成写作策略分析，包含可迁移的段落与句式框架。 |
@@ -96,7 +97,7 @@ npm start      # 运行生产构建
 
 ## 技术栈
 
-Next.js 15、React 19、TypeScript、PDF.js、Node.js SQLite（`node:sqlite`）、IndexedDB（`idb`，仅供旧数据一次性迁移）、DeepSeek Chat Completions 流式接口、`react-markdown`、KaTeX、ESLint、Vitest。
+Next.js 15、React 19、TypeScript、PDF.js、Node.js SQLite（`node:sqlite`）、IndexedDB（`idb`，仅供旧数据一次性迁移）、DeepSeek 与智谱 GLM 流式接口、`react-markdown`、KaTeX、ESLint、Vitest。
 
 ## 参与贡献
 

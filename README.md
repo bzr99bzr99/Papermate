@@ -4,7 +4,7 @@
 ![Node](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen)
 ![Next.js](https://img.shields.io/badge/Next.js-15-black)
 
-PaperMate is a local-first, AI-assisted PDF reading tool for academic papers. Import a PDF with a text layer, read it in its original page layout, select passages directly on the page, and ask DeepSeek to translate, explain, answer questions, or generate reading notes, argument maps, and writing analysis.
+PaperMate is a local-first, AI-assisted PDF reading tool for academic papers. Import a PDF with a text layer, read it in its original page layout, select passages directly on the page, and ask DeepSeek or the free Zhipu GLM model to translate, explain, answer questions, or generate reading notes, argument maps, and writing analysis.
 
 Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click installation is documented in [安装说明.md](安装说明.md) and [INSTALL.md](INSTALL.md). Feature and version history is tracked in [功能日志.md](功能日志.md) (Chinese).
 
@@ -16,13 +16,13 @@ Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click ins
 - **Two model modes** - `Flash` for fast translation and routine questions; `MAX thinking` for explanation, summarization, and writing analysis.
 - **Structured reading artifacts** - Generate reading notes, a collapsible paper mind map, and a writing-strategy analysis in Markdown with math rendering.
 - **Local-first data** - PDFs, highlights, conversations, notes, and generated artifacts are stored in a local SQLite database at `data/papermate.db`; complete JSON backups are created manually.
-- **Windows one-click installer** - The included scripts install dependencies, build the production app, create desktop/Start menu shortcuts, register an uninstall entry, and upgrade an existing install in place.
+- **Windows one-click install/upgrade/uninstall** - Fresh install into a chosen location when no version exists; overwrite install in place when an existing version is detected, preserving the `data` folder; plus a one-click upgrade script that updates an installed version from the current source.
 
 ## Requirements
 
 - Node.js 22.5 or newer (Node.js LTS recommended)
 - npm
-- A [DeepSeek API key](https://platform.deepseek.com/) for model requests
+- A [DeepSeek API key](https://platform.deepseek.com/) or a free [Zhipu GLM API key](https://open.bigmodel.cn/) for model requests (either one)
 - Windows 10/11 for the one-click installer; manual development works on any OS supported by Node.js and Next.js
 
 ## Quick Start
@@ -32,13 +32,14 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, click **模型设置 / Model settings**, enter your DeepSeek API key, and verify the connection.
+Open `http://localhost:3000`, click **模型设置 / Model settings**, enter your DeepSeek or Zhipu GLM API key, and verify the connection.
 
 ## Windows One-Click Install
 
-Double-click `一键安装.bat`. If PaperMate has not been installed yet, choose an install location; the installer copies the project, installs dependencies, builds the production app, and creates shortcuts. If an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, the installer automatically upgrades that installation and preserves the `data` folder.
-
-`一键升级.bat` provides the same upgrade from the current project source without opening the location picker. Uninstall is available from the Start menu, the install directory, or Windows Settings. See [INSTALL.md](INSTALL.md) and [安装说明.md](安装说明.md) for details.
+- **Fresh install (no existing version)** - Double-click `一键安装.bat`, choose an install location, and the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
+- **Overwrite install (existing version detected)** - Double-click `一键安装.bat` again; once an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, it directly overwrites with the new version while preserving the `data` folder, without asking for a location again.
+- **One-click upgrade** - `一键升级.bat` in the project root updates an existing installation from the current project source, also preserving data and skipping the location picker.
+- Uninstall is available from the Start menu, the install directory, or Windows Settings. See [INSTALL.md](INSTALL.md) and [安装说明.md](安装说明.md) for details.
 
 ## Usage
 
@@ -55,7 +56,7 @@ Double-click `一键安装.bat`. If PaperMate has not been installed yet, choose
 | ![Library home](截图/首页.png) | Paper library: drag in PDFs, search papers, and check disk backup status. |
 | ![Reading and selection](截图/辅助阅读.png) | Original-page reader with a transparent text layer for passage selection. |
 | ![Chat](截图/问答.png) | Selected passage plus multi-turn questions and one-click translation/explanation prompts. |
-| ![Settings](截图/设置.png) | Model settings, API key verification, themes, and local backup management. |
+| ![Settings](截图/设置.png) | Model settings, provider and API key verification, themes, and local backup management. |
 | ![Reading notes](截图/阅读笔记.png) | Generated reading notes with page-referenced evidence. |
 | ![Mind map](截图/论文脑图.png) | Collapsible argument-structure mind map. |
 | ![Writing analysis](截图/写作思路.png) | Writing-strategy analysis with reusable frameworks. |
@@ -96,7 +97,7 @@ npm start      # run the production build
 
 ## Tech Stack
 
-Next.js 15, React 19, TypeScript, PDF.js, Node.js SQLite (`node:sqlite`), IndexedDB (`idb`, kept only for one-time legacy migration), DeepSeek Chat Completions with streaming, `react-markdown`, KaTeX, ESLint, and Vitest.
+Next.js 15, React 19, TypeScript, PDF.js, Node.js SQLite (`node:sqlite`), IndexedDB (`idb`, kept only for one-time legacy migration), DeepSeek and Zhipu GLM Chat Completions with streaming, `react-markdown`, KaTeX, ESLint, and Vitest.
 
 ## Contributing
 
