@@ -2127,8 +2127,7 @@ interface PdfReaderProps {
   highlightRegions: HighlightRegion[];
   conversations: Conversation[];
   activeConversationId?: string;
-  onSelectConversation?: (conversation: Conversation) => void;
-  onDeleteConversation?: (conversation: Conversation) => void;
+  onDeleteTurn?: (conversation: Conversation, turnId: string) => void;
   outline: PaperSection[];
   requestedChapterPage?: ChapterScrollRequest;
   conversationFocusRequest?: ConversationFocusRequest;
@@ -2148,8 +2147,7 @@ export function PdfReader({
   highlightRegions,
   conversations,
   activeConversationId,
-  onSelectConversation,
-  onDeleteConversation,
+  onDeleteTurn,
   outline,
   requestedChapterPage,
   conversationFocusRequest,
@@ -2708,6 +2706,11 @@ export function PdfReader({
     setPinnedPoint({ x: clientX, y: clientY });
     setPinnedRegionIds(regionIds);
     setPinFlashNonce((nonce) => nonce + 1);
+    // 点击高亮注释 = 划选这段高亮内容，可直接在右侧对话中提问。
+    const region = highlightRegions.find((entry) => regionIds.includes(entry.id));
+    if (region) {
+      onSelectAnchor(region.anchor, false);
+    }
     return true;
   }
 
@@ -2988,79 +2991,81 @@ export function PdfReader({
   return (
     <div className="reader-wrap">
       <div className="reader-toolbar">
-        <div className="reader-toolbar-group">
-          <div className="reader-page-control">
-            <button aria-label="上一页" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
-              <ChevronLeft size={17} />
-            </button>
-            <span>第 {pageNumber} / {paper.pageCount} 页</span>
-            <button aria-label="下一页" disabled={pageNumber >= paper.pageCount} onClick={() => goToPage(pageNumber + 1)}>
-              <ChevronRight size={17} />
-            </button>
-          </div>
-          <div className="reader-zoom-control">
-            <button
-              type="button"
-              ref={zoomOutButtonRef}
-              aria-label="缩小"
-              title="缩小"
-              disabled={displayZoom <= 0.5}
-              onClick={() => changeZoom(stepReaderZoom(liveZoomRef.current, -1))}
-            >
-              <ZoomOut size={15} />
-            </button>
-            <button
-              type="button"
-              ref={zoomValueRef}
-              className="zoom-value"
-              aria-label={`缩放 ${Math.round(displayZoom * 100)}%，点击重置`}
-              title="重置为 100%"
-              onClick={() => changeZoom(1)}
-            >
-              {Math.round(displayZoom * 100)}%
-            </button>
-            <button
-              type="button"
-              ref={zoomInButtonRef}
-              aria-label="放大"
-              title="放大"
-              disabled={displayZoom >= 3}
-              onClick={() => changeZoom(stepReaderZoom(liveZoomRef.current, 1))}
-            >
-              <ZoomIn size={15} />
-            </button>
-            <button
-              type="button"
-              ref={resetZoomButtonRef}
-              aria-label="重置缩放"
-              title="重置为 100%"
-              disabled={displayZoom === 1}
-              onClick={() => changeZoom(1)}
-            >
-              <RotateCcw size={14} />
-            </button>
-            <button
-              type="button"
-              className={panMode ? "active" : ""}
-              aria-pressed={panMode}
-              aria-label={panMode ? "退出拖动模式" : "进入拖动模式"}
-              title={panMode ? "退出拖动模式" : "拖动模式"}
-              onClick={() => setPanMode((current) => !current)}
-            >
-              <Hand size={15} />
-            </button>
-          </div>
+        <div className="reader-restore reader-restore-left">
+          {leftCollapsed ? (
+            <button type="button" onClick={onRestoreLeft}><PanelLeftOpen size={14} /> 展开左侧</button>
+          ) : null}
         </div>
-        <div className="reader-toolbar-group reader-toolbar-right">
-          <span className="selection-tip"><MousePointer2 size={14} /> 划选提问 · Ctrl/Cmd 追加</span>
-          <div className="reader-restore">
-            {leftCollapsed ? (
-              <button type="button" onClick={onRestoreLeft}><PanelLeftOpen size={14} /> 展开左侧</button>
-            ) : null}
-            {rightCollapsed ? (
-              <button type="button" onClick={onRestoreRight}><PanelRightOpen size={14} /> 展开右侧</button>
-            ) : null}
+        <div className="reader-toolbar-center">
+          <div className="reader-toolbar-group">
+            <div className="reader-page-control">
+              <button aria-label="上一页" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
+                <ChevronLeft size={17} />
+              </button>
+              <span>第 {pageNumber} / {paper.pageCount} 页</span>
+              <button aria-label="下一页" disabled={pageNumber >= paper.pageCount} onClick={() => goToPage(pageNumber + 1)}>
+                <ChevronRight size={17} />
+              </button>
+            </div>
+            <div className="reader-zoom-control">
+              <button
+                type="button"
+                ref={zoomOutButtonRef}
+                aria-label="缩小"
+                title="缩小"
+                disabled={displayZoom <= 0.5}
+                onClick={() => changeZoom(stepReaderZoom(liveZoomRef.current, -1))}
+              >
+                <ZoomOut size={15} />
+              </button>
+              <button
+                type="button"
+                ref={zoomValueRef}
+                className="zoom-value"
+                aria-label={`缩放 ${Math.round(displayZoom * 100)}%，点击重置`}
+                title="重置为 100%"
+                onClick={() => changeZoom(1)}
+              >
+                {Math.round(displayZoom * 100)}%
+              </button>
+              <button
+                type="button"
+                ref={zoomInButtonRef}
+                aria-label="放大"
+                title="放大"
+                disabled={displayZoom >= 3}
+                onClick={() => changeZoom(stepReaderZoom(liveZoomRef.current, 1))}
+              >
+                <ZoomIn size={15} />
+              </button>
+              <button
+                type="button"
+                ref={resetZoomButtonRef}
+                aria-label="重置缩放"
+                title="重置为 100%"
+                disabled={displayZoom === 1}
+                onClick={() => changeZoom(1)}
+              >
+                <RotateCcw size={14} />
+              </button>
+              <button
+                type="button"
+                className={panMode ? "active" : ""}
+                aria-pressed={panMode}
+                aria-label={panMode ? "退出拖动模式" : "进入拖动模式"}
+                title={panMode ? "退出拖动模式" : "拖动模式"}
+                onClick={() => setPanMode((current) => !current)}
+              >
+                <Hand size={15} />
+              </button>
+            </div>
           </div>
+          <span className="selection-tip"><MousePointer2 size={14} /> 划选提问 · Ctrl/Cmd 追加</span>
+        </div>
+        <div className="reader-restore reader-restore-right">
+          {rightCollapsed ? (
+            <button type="button" onClick={onRestoreRight}><PanelRightOpen size={14} /> 展开右侧</button>
+          ) : null}
         </div>
       </div>
       <section
@@ -3096,8 +3101,7 @@ export function PdfReader({
           activeConversationId={activeConversationId}
           point={pinnedPoint}
           pinned
-          onSelectConversation={onSelectConversation}
-          onDeleteConversation={onDeleteConversation}
+          onDeleteTurn={onDeleteTurn}
         />
       ) : hoveredRegionIds.length && hoverPoint ? (
         <HighlightPopover
@@ -3106,8 +3110,7 @@ export function PdfReader({
           conversations={conversations}
           activeConversationId={activeConversationId}
           point={hoverPoint}
-          onSelectConversation={onSelectConversation}
-          onDeleteConversation={onDeleteConversation}
+          onDeleteTurn={onDeleteTurn}
         />
       ) : null}
       </section>
@@ -3131,19 +3134,16 @@ interface HighlightPopoverProps {
   activeConversationId?: string;
   point: { x: number; y: number };
   pinned?: boolean;
-  onSelectConversation?: (conversation: Conversation) => void;
-  onDeleteConversation?: (conversation: Conversation) => void;
+  onDeleteTurn?: (conversation: Conversation, turnId: string) => void;
 }
 
 function HighlightPopover({
   regionIds,
   regions,
   conversations,
-  activeConversationId,
   point,
   pinned = false,
-  onSelectConversation,
-  onDeleteConversation,
+  onDeleteTurn,
 }: HighlightPopoverProps) {
   const matchedRegions = useMemo(
     () =>
@@ -3173,12 +3173,48 @@ function HighlightPopover({
     }
     return items;
   }, [relatedConversations]);
-  const recordsConversation = relatedConversations[0];
+  const [recordsConversation, setRecordsConversation] = useState<Conversation>();
+  useEffect(() => {
+    setRecordsConversation((current) => {
+      if (current && relatedConversations.some((item) => item.id === current.id)) {
+        return current;
+      }
+      return relatedConversations[0];
+    });
+  }, [relatedConversations]);
   const [position, setPosition] = useState(popoverPosition);
   useEffect(() => {
     setPosition(popoverPosition());
   }, [point]);
   const popoverRef = useRef<HTMLDivElement | null>(null);
+  // 当前选中的问答记录：问答索引只高亮这一条，对话记录滚动到对应位置。
+  const [selectedTurnId, setSelectedTurnId] = useState<string>();
+  const recordsListRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    setSelectedTurnId((current) => {
+      if (recordsConversation && recordsConversation.turns.some((turn) => turn.id === current)) {
+        return current;
+      }
+      const lastUserTurn = [...(recordsConversation?.turns ?? [])]
+        .reverse()
+        .find((turn) => turn.role === "user");
+      return lastUserTurn?.id;
+    });
+  }, [recordsConversation]);
+
+  function selectIndexTurn(conversation: Conversation, turnId: string) {
+    setSelectedTurnId(turnId);
+    if (recordsConversation?.id !== conversation.id) {
+      setRecordsConversation(conversation);
+    }
+    // 滚动浮窗下方的对话记录到对应记录（不滚动阅读窗口）。
+    requestAnimationFrame(() => {
+      const target = recordsListRef.current?.querySelector(
+        `[data-turn-id="${turnId}"]`,
+      );
+      target?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -3294,12 +3330,12 @@ function HighlightPopover({
               return (
                 <div
                   key={item.turn.id}
-                  className={`highlight-popover-index-item ${activeConversationId === conversation.id ? "active" : ""}`}
+                  className={`highlight-popover-index-item ${selectedTurnId === item.turn.id ? "active" : ""}`}
                 >
                   <button
                     type="button"
                     className="highlight-popover-index-item-main"
-                    onClick={() => onSelectConversation?.(conversation)}
+                    onClick={() => selectIndexTurn(item.conversation, item.turn.id)}
                   >
                     <span className={`highlight-color-dot highlight-color-dot-${color}`} aria-hidden="true" />
                     <span className="highlight-popover-page">
@@ -3321,7 +3357,7 @@ function HighlightPopover({
                     onClick={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      onDeleteConversation?.(conversation);
+                      onDeleteTurn?.(item.conversation, item.turn.id);
                     }}
                   >
                     <Trash2 size={12} />
@@ -3340,9 +3376,13 @@ function HighlightPopover({
           <b>{recordsConversation ? readableTime(recordsConversation.updatedAt) : "暂无"}</b>
         </div>
         {recordsConversation?.turns.length ? (
-          <div className="highlight-popover-turn-list">
+          <div ref={recordsListRef} className="highlight-popover-turn-list">
             {recordsConversation.turns.map((turn) => (
-              <div key={turn.id} className={`highlight-popover-turn ${turn.role}`}>
+              <div
+                key={turn.id}
+                data-turn-id={turn.id}
+                className={`highlight-popover-turn ${turn.role} ${selectedTurnId === turn.id ? "selected" : ""}`}
+              >
                 <span>{turn.role === "user" ? "你" : "PaperMate"}</span>
                 {turn.role === "user" ? (
                   <p>{turn.content}</p>

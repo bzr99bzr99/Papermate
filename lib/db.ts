@@ -151,6 +151,25 @@ export async function lookupPaperMetadata(
   });
 }
 
+export interface ApiKeyPair {
+  deepseek?: string;
+  glm?: string;
+  kimi?: string;
+}
+
+/** 从 data/apikey.txt 读取已持久化的 API Key。 */
+export async function getApiKeys(): Promise<ApiKeyPair> {
+  return requestJson<ApiKeyPair>("/api/storage/apikey");
+}
+
+/** 把 API Key 持久化到 data/apikey.txt（明文文本，仅存本机）。 */
+export async function saveApiKeys(keys: ApiKeyPair): Promise<void> {
+  await requestJson<{ ok: true }>("/api/storage/apikey", {
+    method: "POST",
+    body: JSON.stringify(keys),
+  });
+}
+
 export interface DiskBackupInfo {
   filePath: string;
   savedAt?: string;

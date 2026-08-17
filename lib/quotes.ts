@@ -1,3 +1,33 @@
+/**
+ * 拾句内容以纯文本保存在项目 public/quotes.txt（每行一句，# 开头为注释），
+ * 便于直接增删改且随项目提交到 GitHub（data/ 目录不上传）。
+ * 文件缺失或加载失败时回退到内置 READER_QUOTES。
+ * 加载一次后保存在缓存中（本页会话内有效），刷新页面后重新读取。
+ */
+const QUOTES_URL = "/quotes.txt";
+
+let quotesCache: string[] | undefined;
+
+export async function loadReaderQuotes(): Promise<readonly string[]> {
+  if (quotesCache) return quotesCache;
+  try {
+    const response = await fetch(QUOTES_URL, { cache: "no-store" });
+    if (!response.ok) throw new Error("quotes file unavailable");
+    const lines = (await response.text())
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"));
+    if (lines.length) {
+      quotesCache = lines;
+      return lines;
+    }
+  } catch {
+    // 文件缺失或网络异常时回退到内置拾句
+  }
+  quotesCache = [...READER_QUOTES];
+  return quotesCache;
+}
+
 export const READER_QUOTES: readonly string[] = [
   "为有牺牲多壮志，敢教日月换新天。",
   "世上无难事，只要肯登攀。",

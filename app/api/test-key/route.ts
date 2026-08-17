@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
+import { readApiKeyFile } from "@/lib/api-keys";
 
 export const runtime = "nodejs";
 
-type Provider = "deepseek" | "glm";
+type Provider = "deepseek" | "glm" | "kimi";
 
 export async function POST(request: Request) {
   const body = (await request.json()) as { provider?: Provider; apiKey?: string };
-  const provider = body.provider === "glm" ? "glm" : "deepseek";
-  const apiKey = body.apiKey?.trim();
+  const provider = body.provider === "glm" ? "glm" : body.provider === "kimi" ? "kimi" : "deepseek";
+  // 优先测试设置页里刚输入的 Key（body），未提供时使用 data/apikey.txt 中已保存的 Key。
+  const apiKey = body.apiKey?.trim() || readApiKeyFile()[provider]?.trim();
   if (!apiKey) {
     return NextResponse.json({ error: "请先输入 API Key。" }, { status: 400, headers: { "Cache-Control": "no-store" } });
   }
@@ -25,10 +27,13 @@ export async function POST(request: Request) {
               stream: false,
             }),
           })
-        : await fetch("https://api.deepseek.com/models", {
-            headers: { Authorization: `Bearer ${apiKey}` },
-            cache: "no-store",
-          });
+        : await fetch(
+            provider === "kimi" ? "https://api.moonshot.cn/v1/models" : "https://api.deepseek.com/models",
+            {
+              headers: { Authorization: `Bearer ${apiKey}` },
+              cache: "no-store",
+            },
+          );
     if (!upstream.ok) {
       return NextResponse.json({ error: "API Key 无效或当前不可用。" }, { status: upstream.status, headers: { "Cache-Control": "no-store" } });
     }

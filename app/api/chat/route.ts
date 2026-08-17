@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { taskInstructions, type Task } from "@/lib/prompts";
+import { loadTaskInstructions, type Task } from "@/lib/prompts";
+import { readApiKeyFile } from "@/lib/api-keys";
 
 export const runtime = "nodejs";
 
 type IncomingMessage = { role: "user" | "assistant"; content: string };
-type Provider = "deepseek" | "glm";
+type Provider = "deepseek" | "glm" | "kimi";
 
 const providerTargets: Record<Provider, { url: string; model: string; label: string }> = {
   deepseek: {
@@ -16,6 +17,11 @@ const providerTargets: Record<Provider, { url: string; model: string; label: str
     url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     model: "glm-4.7-flash",
     label: "GLM",
+  },
+  kimi: {
+    url: "https://api.moonshot.cn/v1/chat/completions",
+    model: "kimi-k2.5",
+    label: "Kimi",
   },
 };
 
@@ -64,9 +70,11 @@ export async function POST(request: Request) {
     question?: string;
     messages?: IncomingMessage[];
   };
-  const provider = body.provider === "glm" ? "glm" : "deepseek";
+  const provider = body.provider === "glm" ? "glm" : body.provider === "kimi" ? "kimi" : "deepseek";
   const target = providerTargets[provider];
-  const apiKey = body.apiKey?.trim();
+  // API Key 直接从本机 data/apikey.txt 读取，浏览器不再随请求发送密钥；
+  // 兼容旧调用方：请求体里的 apiKey 作为兜底。
+  const apiKey = readApiKeyFile()[provider]?.trim() || body.apiKey?.trim();
   const task = body.task ?? "free";
   const mode = body.mode === "deep" ? "deep" : "fast";
   const context = body.context?.slice(0, 160000) ?? "";
@@ -85,42 +93,63 @@ export async function POST(request: Request) {
     question ? `\n用户请求：${question}` : "\n请按任务要求完成。",
   ].join("\n");
 
+  // 提示词来自项目 public/prompts.txt（可随时编辑，缺失任务回退内置默认）。
+  const instructions = loadTaskInstructions();
+
+  // GLM 免费档等上游对 429 限流有较长的冷却窗口（实测约 12-20 秒），
+  // 这里在返回错误前用递增退避重试，覆盖冷却期后直接开始流式输出。
+  const RETRYABLE_UPSTREAM_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+  const RETRY_BACKOFF_MS = [3000, 7000, 13000];
   try {
-    const upstream = await fetch(target.url, {
+    let upstream: Response | undefined;
+    let upstreamStatus = 0;
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+    upstream = await fetch(target.url, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       cache: "no-store",
       body: JSON.stringify({
         model: target.model,
         stream: true,
-        ...(provider === "deepseek"
+        ...(provider === "deepseek" || provider === "kimi"
           ? {
               thinking: { type: mode === "deep" ? "enabled" : "disabled" },
-              ...(mode === "deep" ? { reasoning_effort: "max" } : {}),
+              ...(provider === "deepseek" && mode === "deep" ? { reasoning_effort: "max" } : {}),
             }
           : {}),
         messages: [
           {
             role: "system",
-            content: `你是严谨的计算机科学与技术领域的论文阅读助手，默认用中文回答。${taskInstructions[task]} 不暴露或复述模型内部思考过程。`,
+            content: `你是严谨的计算机科学与技术领域的论文阅读助手，默认用中文回答。${instructions[task]} 不暴露或复述模型内部思考过程。`,
           },
           ...messages,
           { role: "user", content: userContent },
         ],
       }),
     });
-    if (!upstream.ok || !upstream.body) {
-      const reason =
-        upstream.status === 429
-          ? "（上游并发/速率限制，已在自动重试，若仍失败请稍后再试）"
-          : upstream.status === 401
-            ? "（API Key 无效或已失效）"
-            : "";
-      return NextResponse.json({ error: `${target.label} 请求失败（HTTP ${upstream.status}）${reason}，请检查 Key、额度和网络。` }, { status: upstream.status || 502, headers: { "Cache-Control": "no-store" } });
+    upstreamStatus = upstream.status;
+    if (
+      upstream.ok ||
+      !RETRYABLE_UPSTREAM_STATUS.has(upstreamStatus) ||
+      attempt === RETRY_BACKOFF_MS.length
+    ) {
+      break;
     }
-    return new Response(sseTextStream(upstream.body), {
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store, no-transform" },
-    });
+    await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
+  }
+  if (!upstream || !upstream.ok || !upstream.body) {
+    const status = upstreamStatus || 502;
+    const reason =
+      status === 429
+        ? "（上游并发/速率限制，已自动重试多次仍失败，请稍等约 20 秒后再试）"
+        : status === 401
+          ? "（API Key 无效或已失效）"
+          : "";
+    return NextResponse.json({ error: `${target.label} 请求失败（HTTP ${status}）${reason}，请检查 Key、额度和网络。` }, { status: status || 502, headers: { "Cache-Control": "no-store" } });
+  }
+  return new Response(sseTextStream(upstream.body), {
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store, no-transform" },
+  });
   } catch {
     return NextResponse.json({ error: `无法连接 ${target.label}，请稍后重试。` }, { status: 502, headers: { "Cache-Control": "no-store" } });
   }

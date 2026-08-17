@@ -1,5 +1,28 @@
-import { describe, expect, it } from "vitest";
-import { taskInstructions } from "./prompts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  loadTaskInstructions,
+  parsePromptsFile,
+  taskInstructions,
+} from "./prompts";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function tempPromptsFile(content: string): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "papermate-prompts-"));
+  tempDirs.push(dir);
+  const file = path.join(dir, "prompts.txt");
+  writeFileSync(file, content, "utf8");
+  return file;
+}
 
 describe("task prompts", () => {
   it("keeps a dedicated instruction for every chat task", () => {
@@ -49,5 +72,30 @@ describe("task prompts", () => {
     expect(prompt).toContain("标页码");
     expect(prompt).toContain("只能引用提供给你的原文");
     expect(prompt).toContain("原文未明确说明");
+  });
+
+  it("parses [task] blocks from the prompts text file", () => {
+    const parsed = parsePromptsFile(
+      "# comment\n[translate]\n自定义翻译指令。\n\n[notes]\n自定义笔记指令。\n",
+    );
+    expect(parsed.translate).toBe("自定义翻译指令。");
+    expect(parsed.notes).toBe("自定义笔记指令。");
+    expect(parsed.writing).toBeUndefined();
+  });
+
+  it("merges overrides from the text file and keeps defaults for missing tasks", () => {
+    const file = tempPromptsFile("[translate]\n自定义翻译指令。\n[writing]\n自定义写作指令。\n");
+    const loaded = loadTaskInstructions(file);
+    expect(loaded.translate).toBe("自定义翻译指令。");
+    expect(loaded.writing).toBe("自定义写作指令。");
+    expect(loaded.context).toBe(taskInstructions.context);
+    expect(loaded.notes).toBe(taskInstructions.notes);
+  });
+
+  it("falls back to built-in defaults when the prompts file is missing", () => {
+    const loaded = loadTaskInstructions(
+      path.join(os.tmpdir(), "papermate-prompts-does-not-exist.txt"),
+    );
+    expect(loaded).toEqual(taskInstructions);
   });
 });

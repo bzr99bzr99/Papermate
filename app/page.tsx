@@ -28,6 +28,7 @@ import {
   HardDrive,
   LoaderCircle,
   MessageCircleMore,
+  Moon,
   Network,
   Palette,
   PanelLeftClose,
@@ -62,6 +63,7 @@ import {
   exportBackup,
   fetchDiskBackup,
   findPaperBySourceHash,
+  getApiKeys,
   getPaper,
   getSettings,
   getWorkspace,
@@ -69,6 +71,7 @@ import {
   listPapers,
   lookupPaperMetadata,
   reorderPapers,
+  saveApiKeys,
   saveSettings,
   savePaper,
   saveWorkspace,
@@ -94,7 +97,7 @@ import {
   selectionGroupForAnchors,
 } from "@/lib/pdf";
 import { markdownToMindMap, mindMapToSvg } from "@/lib/mindmap";
-import { READER_QUOTES } from "@/lib/quotes";
+import { loadReaderQuotes, READER_QUOTES } from "@/lib/quotes";
 import { blobSha256 } from "@/lib/source-hash";
 import type {
   ArtifactKind,
@@ -160,7 +163,9 @@ function uid() {
 // GLM 免费档对同一账号并发有限，采用全局单任务：一次只允许一个问答/生成任务，
 // 执行期间其他提交按钮禁用；DeepSeek 无并发限制，保持原有并行逻辑。
 
-// 对可重试的上游错误（限流/超时/5xx）做带退避的自动重试，避免瞬时限流直接报失败。
+// 对可重试的上游错误（超时/5xx）做带退避的自动重试，避免瞬时限流直接报失败；
+// 429 由服务端 /api/chat 内部做长退避重试（覆盖 GLM 免费档约 20 秒的冷却窗口），
+// 客户端不再重复重试，避免叠加等待。
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
@@ -171,7 +176,6 @@ async function fetchWithRetry(
     const response = await fetch(url, init);
     const retryable =
       response.status === 408 ||
-      response.status === 429 ||
       response.status >= 500;
     if (!retryable) return response;
     lastResponse = response;
@@ -272,6 +276,16 @@ function isNormalScope(conversation: Conversation): boolean {
   return (conversation.scope ?? "normal") === "normal";
 }
 
+function normalizedQuote(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+/** 一条提问记录对应的原文引文（取首个片段），用于同内容去重。 */
+function turnQuote(turn: ChatTurn): string {
+  const anchor = turn.selection?.anchors[0] ?? turn.anchor;
+  return anchor ? normalizedQuote(anchor.quote) : "";
+}
+
 function conversationMatchesSelection(
   conversation: Conversation,
   selection?: SelectionGroup,
@@ -357,12 +371,14 @@ export default function Home() {
   const [rightView, setRightView] = useState<RightView>("chat");
   const [apiKey, setApiKey] = useState("");
   const [glmApiKey, setGlmApiKey] = useState("");
+  const [kimiApiKey, setKimiApiKey] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>("classic");
   const [keyState, setKeyState] = useState<KeyState>("idle");
   const [glmKeyState, setGlmKeyState] = useState<KeyState>("idle");
+  const [kimiKeyState, setKimiKeyState] = useState<KeyState>("idle");
   const [mode, setMode] = useState<ModelMode>("fast");
-  const [modelProvider, setModelProvider] = useState<ModelProvider>("deepseek");
+  const [modelProvider, setModelProvider] = useState<ModelProvider>("glm");
   const [question, setQuestion] = useState("");
   const [runningKinds, setRunningKinds] = useState<Set<string>>(new Set());
   const [noticeKinds, setNoticeKinds] = useState<Set<string>>(new Set());
@@ -399,10 +415,33 @@ export default function Home() {
   const pendingWorkspaceRef = useRef<PaperWorkspace | null>(null);
   const workspaceRef = useRef<PaperWorkspace>(blankWorkspace);
   workspaceRef.current = workspace;
-  const runningConversationIdRef = useRef<string | undefined>(undefined);
+  const runningChatIdsRef = useRef<Set<string>>(new Set());
+  const [runningChatIds, setRunningChatIds] = useState<ReadonlySet<string>>(new Set());
   const deletedConversationIdsRef = useRef<Set<string>>(new Set());
   const paperIdRef = useRef<string | undefined>(paper?.id);
   paperIdRef.current = paper?.id;
+  // API Key 持久化：从 data/apikey.txt 读取，修改后防抖写回。
+  const keysLoadedRef = useRef(false);
+  const loadedKeysRef = useRef<{ deepseek: string; glm: string; kimi: string }>({
+    deepseek: "",
+    glm: "",
+    kimi: "",
+  });
+  // DeepSeek / Kimi 支持并发对话：多个会话可同时流式生成；GLM 免费档保持单任务。
+  const beginChat = useCallback((conversationId: string) => {
+    runningChatIdsRef.current = new Set(runningChatIdsRef.current).add(conversationId);
+    setRunningChatIds(new Set(runningChatIdsRef.current));
+    setRunningKinds((prev) => new Set(prev).add("chat"));
+  }, []);
+  const endChat = useCallback((conversationId: string) => {
+    const next = new Set(runningChatIdsRef.current);
+    next.delete(conversationId);
+    runningChatIdsRef.current = next;
+    setRunningChatIds(next);
+    if (next.size === 0) {
+      finishKind("chat", paperIdRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     setNoticeKinds(new Set());
@@ -601,6 +640,20 @@ export default function Home() {
         if (disk?.savedAt) setBackupSavedAt(disk.savedAt);
         applyBackupSettings(settings);
         settingsLoadedRef.current = true;
+        // 读取 data/apikey.txt 中持久化的 API Key（失败时保持空值，不阻断启动）。
+        const keys = await getApiKeys().catch(
+          (): { deepseek?: string; glm?: string; kimi?: string } => ({}),
+        );
+        if (cancelled) return;
+        loadedKeysRef.current = {
+          deepseek: keys.deepseek ?? "",
+          glm: keys.glm ?? "",
+          kimi: keys.kimi ?? "",
+        };
+        keysLoadedRef.current = true;
+        setApiKey(loadedKeysRef.current.deepseek);
+        setGlmApiKey(loadedKeysRef.current.glm);
+        setKimiApiKey(loadedKeysRef.current.kimi);
       } catch {
         settingsLoadedRef.current = true;
         if (!cancelled) setNotice("无法打开本地论文库。");
@@ -610,6 +663,61 @@ export default function Home() {
       cancelled = true;
     };
   }, [applyBackupSettings]);
+
+  // 把当前输入的 API Key 写回 data/apikey.txt；与已保存值相同则跳过（避免启动时多写一次）。
+  // 提问前也会主动调用一次，保证服务端从文件读到的是最新 Key。
+  const persistApiKeys = useCallback(() => {
+    if (!keysLoadedRef.current) return Promise.resolve();
+    if (
+      apiKey === loadedKeysRef.current.deepseek &&
+      glmApiKey === loadedKeysRef.current.glm &&
+      kimiApiKey === loadedKeysRef.current.kimi
+    ) {
+      return Promise.resolve();
+    }
+    loadedKeysRef.current = { deepseek: apiKey, glm: glmApiKey, kimi: kimiApiKey };
+    return saveApiKeys({ deepseek: apiKey, glm: glmApiKey, kimi: kimiApiKey }).catch(() =>
+      setNotice("API Key 保存失败。"),
+    );
+  }, [apiKey, glmApiKey, kimiApiKey]);
+
+  // API Key 修改后防抖写回 data/apikey.txt。
+  useEffect(() => {
+    if (!keysLoadedRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistApiKeys();
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [apiKey, glmApiKey, kimiApiKey, persistApiKeys]);
+
+  // 设置面板打开时，从 data/apikey.txt 重新读取（外部手工增删改也能同步到界面）。
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let cancelled = false;
+    void getApiKeys()
+      .catch((): { deepseek?: string; glm?: string; kimi?: string } => ({}))
+      .then((keys) => {
+        if (cancelled) return;
+        loadedKeysRef.current = {
+          deepseek: keys.deepseek ?? "",
+          glm: keys.glm ?? "",
+          kimi: keys.kimi ?? "",
+        };
+        keysLoadedRef.current = true;
+        setApiKey(loadedKeysRef.current.deepseek);
+        setGlmApiKey(loadedKeysRef.current.glm);
+        setKimiApiKey(loadedKeysRef.current.kimi);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsOpen]);
+
+  // 关闭设置时立即把增删改同步写回 data/apikey.txt（不等 600ms 防抖）。
+  const closeSettings = useCallback(() => {
+    void persistApiKeys();
+    setSettingsOpen(false);
+  }, [persistApiKeys]);
 
   useEffect(() => {
     try {
@@ -1086,7 +1194,7 @@ export default function Home() {
   }
 
   function deleteConversation(target: Conversation) {
-    if (runningConversationIdRef.current === target.id) {
+    if (runningChatIdsRef.current.has(target.id)) {
       setNotice("这条问答正在生成回复，请稍后再删除。");
       return;
     }
@@ -1103,6 +1211,36 @@ export default function Home() {
     setNotice("已删除这条问答记录，对应对话内容和高亮已同步移除。");
   }
 
+  // 只删除提问/问答索引里的这一条记录：用户问题与其后紧邻的回答成对移除，
+  // 会话中的其他问答不受影响；会话因此清空时整体删除。
+  function deleteConversationTurn(target: Conversation, turnId: string) {
+    if (runningChatIdsRef.current.has(target.id)) {
+      setNotice("这条问答正在生成回复，请稍后再删除。");
+      return;
+    }
+    const turns = target.turns;
+    const index = turns.findIndex((turn) => turn.id === turnId);
+    if (index < 0) return;
+    const removeCount =
+      turns[index].role === "user" && turns[index + 1]?.role === "assistant" ? 2 : 1;
+    const nextTurns = turns.filter((_, i) => i < index || i >= index + removeCount);
+    if (!nextTurns.length) {
+      deleteConversation(target);
+      return;
+    }
+    updateConversation({
+      ...target,
+      turns: nextTurns,
+      updatedAt: new Date().toISOString(),
+    });
+    setNotice("已删除这条问答记录。");
+  }
+
+  const apiKeyFor = (provider: ModelProvider) =>
+    provider === "glm" ? glmApiKey : provider === "kimi" ? kimiApiKey : apiKey;
+  const providerLabelFor = (provider: ModelProvider) =>
+    provider === "glm" ? "智谱 GLM" : provider === "kimi" ? "Moonshot Kimi" : "DeepSeek";
+
   async function streamResponse(
     task: PromptKind | ArtifactKind,
     taskQuestion: string,
@@ -1110,14 +1248,13 @@ export default function Home() {
     history: Array<{ role: "user" | "assistant"; content: string }> = [],
     onText: (content: string) => void,
   ) {
-    const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
     const run = async () => {
+      // API Key 由服务端直接从 data/apikey.txt 读取，客户端不再随请求发送密钥。
       const response = await fetchWithRetry("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider: modelProvider,
-          apiKey: activeApiKey,
           mode,
           task,
           context,
@@ -1150,9 +1287,8 @@ export default function Home() {
       setNotice("GLM 正在处理上一个任务，请稍候。");
       return;
     }
-    if (runningKinds.has("chat")) return;
-    const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
-    const providerLabel = modelProvider === "glm" ? "智谱 GLM" : "DeepSeek";
+    const activeApiKey = apiKeyFor(modelProvider);
+    const providerLabel = providerLabelFor(modelProvider);
     if (!activeApiKey.trim()) {
       setSettingsOpen(true);
       setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
@@ -1168,23 +1304,45 @@ export default function Home() {
       setNotice("先在原版页面上划选一段原文。" );
       return;
     }
+    // 提问前先把最新 API Key 写回文件（服务端从 data/apikey.txt 读取）。
+    await persistApiKeys();
     const now = new Date().toISOString();
     const isContextRequest = kind === "context";
     const baseConversations = workspaceRef.current.conversations;
+    // 同一段原文 + 相同的提问内容 → 复用已有会话（覆盖旧记录，避免重复）。
+    // 匹配顺序：选区/锚点身份 → 内容+问题 → 当前活动会话。
+    const currentQuote = activeAnchors[0] ? normalizedQuote(activeAnchors[0].quote) : "";
+    const fallbackByContent = !currentQuote
+      ? undefined
+      : baseConversations.find((candidate) => {
+          const hasSameQuestion = candidate.turns.some(
+            (turn) =>
+              turn.role === "user" &&
+              turn.kind === kind &&
+              turn.content === finalQuestion &&
+              turnQuote(turn) === currentQuote,
+          );
+          return hasSameQuestion;
+        });
     const activeById = baseConversations.find((conversation) => conversation.id === activeConversationId);
-    const baseConversation = isContextRequest
-      ? baseConversations.find(
-          (conversation) =>
-            conversation.scope === "context" &&
-            conversationMatchesSelection(conversation, activeSelection, activeAnchor),
-        )
-      : activeById && isNormalScope(activeById)
-        ? activeById
+    const baseConversation =
+      (isContextRequest
+        ? baseConversations.find(
+            (conversation) =>
+              conversation.scope === "context" &&
+              conversationMatchesSelection(conversation, activeSelection, activeAnchor),
+          )
         : baseConversations.find(
             (conversation) =>
               isNormalScope(conversation) &&
               conversationMatchesSelection(conversation, activeSelection, activeAnchor),
-          );
+          )) ??
+      fallbackByContent ??
+      (isContextRequest
+        ? undefined
+        : activeById && isNormalScope(activeById)
+          ? activeById
+          : undefined);
     const conversation = baseConversation ?? {
       id: uid(),
       paperId: paper.id,
@@ -1206,6 +1364,11 @@ export default function Home() {
       turns: [],
       updatedAt: now,
     };
+    // 并发对话：同一个会话正在生成时不允许再次提问；其他会话不受影响。
+    if (runningChatIdsRef.current.has(conversation.id)) {
+      setNotice("该对话正在生成回复，请稍候。");
+      return;
+    }
     const userTurn: ChatTurn = {
       id: uid(),
       role: "user",
@@ -1228,19 +1391,39 @@ export default function Home() {
       anchor: activeAnchor,
       selection: activeSelection,
     };
+    // 同内容快捷提问去重：会话中已存在"相同提问 + 相同原文"的记录时，
+    // 在原来的位置覆盖旧记录（用户问题与其后回答成对替换），不追加重复。
+    const existingTurnIndex = conversation.turns.findIndex(
+      (turn) =>
+        turn.role === "user" &&
+        turn.kind === kind &&
+        turn.content === finalQuestion &&
+        turnQuote(turn) === currentQuote,
+    );
+    const nextTurns =
+      existingTurnIndex >= 0
+        ? [
+            ...conversation.turns.slice(0, existingTurnIndex),
+            userTurn,
+            assistantTurn,
+            ...conversation.turns.slice(
+              existingTurnIndex + (conversation.turns[existingTurnIndex + 1]?.role === "assistant" ? 2 : 1),
+            ),
+          ]
+        : [...conversation.turns, userTurn, assistantTurn];
     let currentConversation = {
       ...conversation,
       anchor: activeAnchor,
       selection: activeSelection,
-      turns: [...conversation.turns, userTurn, assistantTurn],
+      turns: nextTurns,
       updatedAt: now,
     };
-    runningConversationIdRef.current = currentConversation.id;
+    beginChat(currentConversation.id);
     updateConversation(currentConversation);
     setActiveConversationId(currentConversation.id);
     setPendingColor(defaultHighlightColor(baseConversations.length + 1));
     setQuestion("");
-    startKind("chat", paper.id);
+    beginChat(currentConversation.id);
     const selectedContext = buildContext(paper.pages, activeAnchors);
     let historyMessages: Array<{ role: "user" | "assistant"; content: string }>;
     let requestContext: string;
@@ -1282,10 +1465,7 @@ export default function Home() {
       };
       updateConversation(currentConversation);
     } finally {
-      if (runningConversationIdRef.current === currentConversation.id) {
-        runningConversationIdRef.current = undefined;
-      }
-      finishKind("chat", paper?.id);
+      endChat(currentConversation.id);
     }
   }
 
@@ -1296,13 +1476,15 @@ export default function Home() {
       return;
     }
     if (runningKinds.has(kind)) return;
-    const activeApiKey = modelProvider === "glm" ? glmApiKey : apiKey;
-    const providerLabel = modelProvider === "glm" ? "智谱 GLM" : "DeepSeek";
+    const activeApiKey = apiKeyFor(modelProvider);
+    const providerLabel = providerLabelFor(modelProvider);
     if (!activeApiKey.trim()) {
       setSettingsOpen(true);
       setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
       return;
     }
+    // 生成前先把最新 API Key 写回文件（服务端从 data/apikey.txt 读取）。
+    await persistApiKeys();
     startKind(kind, paper.id);
     const details = artifactDetails[kind];
     const draft: GeneratedArtifact = {
@@ -1342,9 +1524,14 @@ export default function Home() {
   }
 
   async function testKey(provider: ModelProvider) {
-    const key = provider === "glm" ? glmApiKey : apiKey;
+    const key = apiKeyFor(provider);
     if (!key.trim()) return;
-    const setState = provider === "glm" ? setGlmKeyState : setKeyState;
+    const setState =
+      provider === "glm"
+        ? setGlmKeyState
+        : provider === "kimi"
+          ? setKimiKeyState
+          : setKeyState;
     setState("testing");
     try {
       const response = await fetch("/api/test-key", {
@@ -1609,7 +1796,7 @@ export default function Home() {
         </section>
         <SettingsSheet
           open={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
+          onClose={closeSettings}
           apiKey={apiKey}
           setApiKey={setApiKey}
           state={keyState}
@@ -1618,6 +1805,10 @@ export default function Home() {
           setGlmApiKey={setGlmApiKey}
           glmState={glmKeyState}
           onTestGlm={() => void testKey("glm")}
+          kimiApiKey={kimiApiKey}
+          setKimiApiKey={setKimiApiKey}
+          kimiState={kimiKeyState}
+          onTestKimi={() => void testKey("kimi")}
           theme={theme}
           onThemeChange={setTheme}
           backupState={backupState}
@@ -1667,6 +1858,14 @@ export default function Home() {
               return <button key={kind} className={rightView === kind ? "active" : ""} onClick={() => openView(kind)}><Icon size={17} /> {artifactDetails[kind].title}{runningKinds.has(kind) ? <LoaderCircle className="spin nav-side-icon" size={13} /> : noticeKinds.has(kind) ? <span className="nav-badge" aria-label="有新的生成结果" /> : null}</button>;
             })}
           </nav>
+          <div className="sidebar-model">
+            <ModelSwitch
+              mode={mode}
+              setMode={setMode}
+              provider={modelProvider}
+              setProvider={setModelProvider}
+            />
+          </div>
           <div className="sidebar-divider" />
           <details className="chapter-index" open>
             <summary><BookOpen size={14} /> 章节目录 <b>{(paper.outline ?? []).length}</b></summary>
@@ -1697,7 +1896,6 @@ export default function Home() {
             </div>
           </details>
           <SidebarQuote />
-          <div className="privacy-note"><CheckCircle2 size={15} /> PDF 和成果保存在本机 SQLite，完整 JSON 由你手动导出</div>
         </aside>
         <PdfReader
           paper={paper}
@@ -1705,8 +1903,7 @@ export default function Home() {
           highlightRegions={highlightRegions}
           conversations={workspace.conversations}
           activeConversationId={activeConversationId}
-          onSelectConversation={selectConversation}
-          onDeleteConversation={deleteConversation}
+          onDeleteTurn={deleteConversationTurn}
           outline={paper.outline ?? []}
           requestedChapterPage={chapterScrollRequest}
           conversationFocusRequest={conversationFocusRequest}
@@ -1720,15 +1917,12 @@ export default function Home() {
           onRestoreRight={() => setRightCollapsed(false)}
         />
         <aside className={`assistant-panel ${rightCollapsed ? "collapsed" : ""}`}>
-          <div className="assistant-topbar">
-            <ModelSwitch
-              mode={mode}
-              setMode={setMode}
-              provider={modelProvider}
-              setProvider={setModelProvider}
-            />
-            <button className="panel-collapse" onClick={() => setRightCollapsed(true)} aria-label="折叠右侧" title="折叠右侧"><PanelRightClose size={15} /></button>
-          </div>
+          <button
+            className="panel-collapse panel-collapse-corner"
+            onClick={() => setRightCollapsed(true)}
+            aria-label="折叠右侧"
+            title="折叠右侧"
+          ><PanelRightClose size={15} /></button>
           {rightView === "chat" ? (
             <ChatPanel
               anchors={activeAnchors}
@@ -1738,7 +1932,11 @@ export default function Home() {
               activeConversationId={activeConversationId}
               question={question}
               setQuestion={setQuestion}
-              generating={runningKinds.has("chat") || glmLocked}
+              // 并发对话：仅当当前会话正在生成时禁用发送；其他会话可同时提问。
+              generating={
+                Boolean(selectedConversation?.id && runningChatIds.has(selectedConversation.id)) ||
+                glmLocked
+              }
               pendingColor={pendingColor}
               onPendingColorChange={setPendingColor}
               onChangeColor={changeConversationColor}
@@ -1746,7 +1944,7 @@ export default function Home() {
               onToggleContext={() => setContextMode((current) => !current)}
               onPrompt={(kind) => void sendQuestion(kind)}
               onSelectConversation={selectConversation}
-              onDeleteConversation={deleteConversation}
+              onDeleteTurn={deleteConversationTurn}
               provider={modelProvider}
             />
           ) : (
@@ -1769,7 +1967,7 @@ export default function Home() {
       </div>
       <SettingsSheet
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={closeSettings}
         apiKey={apiKey}
         setApiKey={setApiKey}
         state={keyState}
@@ -1778,6 +1976,10 @@ export default function Home() {
         setGlmApiKey={setGlmApiKey}
         glmState={glmKeyState}
         onTestGlm={() => void testKey("glm")}
+        kimiApiKey={kimiApiKey}
+        setKimiApiKey={setKimiApiKey}
+        kimiState={kimiKeyState}
+        onTestKimi={() => void testKey("kimi")}
         theme={theme}
         onThemeChange={setTheme}
         backupState={backupState}
@@ -1798,18 +2000,31 @@ function Brand({ compact = false }: { compact?: boolean }) {
 }
 
 function SidebarQuote() {
+  const [quotes, setQuotes] = useState<readonly string[]>(READER_QUOTES);
   const [quoteIndex, setQuoteIndex] = useState(0);
+
+  // 拾句内容来自项目 public/quotes.txt（纯文本，可直接增删改），
+  // 加载一次后保存在缓存中，刷新页面后重新读取；失败时用内置列表。
+  useEffect(() => {
+    let cancelled = false;
+    void loadReaderQuotes().then((loaded) => {
+      if (!cancelled) setQuotes(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const pickNext = useCallback(() => {
     setQuoteIndex((current) => {
-      if (READER_QUOTES.length <= 1) return 0;
-      let next = Math.floor(Math.random() * READER_QUOTES.length);
+      if (quotes.length <= 1) return 0;
+      let next = Math.floor(Math.random() * quotes.length);
       if (next === current) {
-        next = (next + 1 + Math.floor(Math.random() * (READER_QUOTES.length - 1))) % READER_QUOTES.length;
+        next = (next + 1 + Math.floor(Math.random() * (quotes.length - 1))) % quotes.length;
       }
       return next;
     });
-  }, []);
+  }, [quotes.length]);
 
   useEffect(() => {
     pickNext();
@@ -1817,7 +2032,7 @@ function SidebarQuote() {
     return () => window.clearInterval(timer);
   }, [pickNext]);
 
-  const quote = READER_QUOTES[quoteIndex] ?? "";
+  const quote = quotes[quoteIndex] ?? "";
   return (
     <button type="button" className="sidebar-quote" aria-label="切换一句" title="点击切换一句" onClick={pickNext}>
       <span className="sidebar-quote-kicker"><Quote size={12} /> 拾句 <RefreshCw size={12} /></span>
@@ -1896,14 +2111,15 @@ function ModelSwitch({ mode, setMode, provider, setProvider }: {
         <button className={mode === "deep" ? "active" : ""} onClick={() => setMode("deep")}><span>深度</span><small>MAX 思考</small></button>
       </div>
       <div className="model-switch provider-switch" role="group" aria-label="模型服务商">
-        <button className={provider === "deepseek" ? "active" : ""} onClick={() => setProvider("deepseek")}><Zap size={12} /><span>DeepSeek</span><small>Flash</small></button>
-        <button className={provider === "glm" ? "active" : ""} onClick={() => setProvider("glm")}><Sparkles size={12} /><span>GLM 免费</span><small>4.7 Flash</small></button>
+        <button className={provider === "glm" ? "active" : ""} onClick={() => setProvider("glm")}><Sparkles size={12} /><span>GLM 免费</span></button>
+        <button className={provider === "kimi" ? "active" : ""} onClick={() => setProvider("kimi")}><Moon size={12} /><span>Kimi K2.5</span></button>
+        <button className={provider === "deepseek" ? "active" : ""} onClick={() => setProvider("deepseek")}><Zap size={12} /><span>DeepSeek</span></button>
       </div>
     </div>
   );
 }
 
-function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, onDeleteConversation, provider }: {
+function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, onDeleteTurn, provider }: {
   anchors?: TextAnchor[];
   selectionGroup?: SelectionGroup;
   conversation?: Conversation;
@@ -1919,12 +2135,20 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   onToggleContext: () => void;
   onPrompt: (kind: PromptKind) => void;
   onSelectConversation: (conversation: Conversation) => void;
-  onDeleteConversation: (conversation: Conversation) => void;
+  onDeleteTurn: (conversation: Conversation, turnId: string) => void;
   provider: ModelProvider;
 }) {
   const historyRef = useRef<HTMLDivElement>(null);
   const [focusRequest, setFocusRequest] = useState<{ turnId: string; nonce: number }>();
   const [selectionExpanded, setSelectionExpanded] = useState(false);
+  // 提问索引只高亮"当前对话记录框中显示的那一条"，而不是整个会话的全部记录。
+  const [activeTurnId, setActiveTurnId] = useState<string>();
+  useEffect(() => {
+    const lastUserTurn = [...(conversation?.turns ?? [])]
+      .reverse()
+      .find((turn) => turn.role === "user");
+    setActiveTurnId(lastUserTurn?.id);
+  }, [conversation?.id, conversation?.turns.length]);
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -1954,6 +2178,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
 
   function jumpToIndex(item: { conversation: Conversation; turn: ChatTurn }) {
     onSelectConversation(item.conversation);
+    setActiveTurnId(item.turn.id);
     setFocusRequest((current) => ({ turnId: item.turn.id, nonce: (current?.nonce ?? 0) + 1 }));
   }
 
@@ -1968,7 +2193,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   const colorMode = conversation ? "会话" : "下一次提问";
 
   return <div className="chat-panel">
-    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{provider === "glm" ? "GLM 4.7 Flash" : "DeepSeek Flash"}</span></div>
+    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{provider === "glm" ? "GLM 4.7 Flash" : provider === "kimi" ? "Kimi K2.5" : "DeepSeek Flash"}</span></div>
     <details className="question-index">
       <summary><MessageCircleMore size={14} /> 提问索引 <b>{indexItems.length}</b></summary>
       {indexItems.length ? (
@@ -1976,7 +2201,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
           {indexItems.map((item) => (
             <div
               key={item.turn.id}
-              className={`question-index-item ${item.conversation.id === activeConversationId ? "active" : ""}`}
+              className={`question-index-item ${item.turn.id === activeTurnId ? "active" : ""}`}
             >
               <button
                 type="button"
@@ -2002,7 +2227,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  onDeleteConversation(item.conversation);
+                  onDeleteTurn(item.conversation, item.turn.id);
                 }}
               >
                 <Trash2 size={12} />
@@ -2158,7 +2383,7 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit }
   </div>;
 }
 
-function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApiKey, setGlmApiKey, glmState, onTestGlm, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath }: {
+function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApiKey, setGlmApiKey, glmState, onTestGlm, kimiApiKey, setKimiApiKey, kimiState, onTestKimi, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath }: {
   open: boolean;
   onClose: () => void;
   apiKey: string;
@@ -2169,6 +2394,10 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
   setGlmApiKey: (value: string) => void;
   glmState: "idle" | "testing" | "valid" | "invalid";
   onTestGlm: () => void;
+  kimiApiKey: string;
+  setKimiApiKey: (value: string) => void;
+  kimiState: "idle" | "testing" | "valid" | "invalid";
+  onTestKimi: () => void;
   theme: ThemeId;
   onThemeChange: (theme: ThemeId) => void;
   backupState: "idle" | "saving" | "saved" | "error" | "restoring";
@@ -2226,7 +2455,7 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                 <div className="settings-block-head">
                   <span className="settings-kicker">MODEL PROVIDERS</span>
                   <h3>模型连接</h3>
-                  <p>API Key 只保留在当前页面内存，不会写入本地论文库。</p>
+                  <p>API Key 明文保存在本机 data/apikey.txt，不会上传，也不会提交到代码仓库。</p>
                 </div>
                 <div className="settings-api-grid">
                   <section className="settings-api-card">
@@ -2242,6 +2471,13 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                     <button className="test-key" disabled={!glmApiKey.trim() || glmState === "testing"} onClick={onTestGlm}>{glmState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{glmState === "testing" ? "验证中" : "验证连接"}</button>
                     {glmState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
                     {glmState === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
+                  </section>
+                  <section className="settings-api-card">
+                    <div className="settings-api-title"><Moon size={17} /><div><b>Kimi K2.5</b><span>长上下文深度推理，可切换快速/深度思考</span></div></div>
+                    <label>Moonshot API Key<input type="password" value={kimiApiKey} onChange={(event) => setKimiApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (kimiApiKey.trim()) onClose(); } }} placeholder="sk-…" autoComplete="off" /></label>
+                    <button className="test-key" disabled={!kimiApiKey.trim() || kimiState === "testing"} onClick={onTestKimi}>{kimiState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{kimiState === "testing" ? "验证中" : "验证连接"}</button>
+                    {kimiState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
+                    {kimiState === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
                   </section>
                 </div>
               </section>

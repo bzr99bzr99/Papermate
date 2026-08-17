@@ -1,5 +1,5 @@
 export type ModelMode = "fast" | "deep";
-export type ModelProvider = "deepseek" | "glm";
+export type ModelProvider = "deepseek" | "glm" | "kimi";
 export type PromptKind = "translate" | "context" | "concept" | "free";
 export type ArtifactKind = "notes" | "mindmap" | "writing";
 export type ConversationScope = "normal" | "context";

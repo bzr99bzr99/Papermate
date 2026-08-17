@@ -2,6 +2,25 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [2.8.0] - 2026-08-16
+
+### Added
+
+- Kimi provider (`kimi-k2.5` via Moonshot) as the third model provider, with its own API key and connection test in the unified settings panel.
+- Quote library (拾句): quotes are shown in the sidebar and can be refreshed; content is editable at `public/quotes.txt` (plain text, one quote per line, `#` for comments).
+- User-editable prompt library at `public/prompts.txt`: each task block starts with a `[task-name]` line; edits take effect on the next request, and deleting a block falls back to the built-in default prompt.
+- API key management: keys are now stored server-side in `data/apikey.txt` (plain text, `data/` is gitignored) with quick add/edit/delete from the settings panel; the browser no longer holds the keys.
+
+### Changed
+
+- DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
+- README (Chinese and English) updated: three providers, quotes & prompt library, and the new local API key storage.
+
+### Fixed
+
+- Sidebar layout bug fixes.
+- Other experience and stability fixes.
+
 ## [2.1.0] - 2026-08-16
 
 ### Changed

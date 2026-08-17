@@ -30,13 +30,18 @@ Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click ins
 - Ten built-in reading themes: classic, paper white, bean green, parchment, dark, cyberpunk, mono, academic blue, Morandi, and noble.
 - Switch themes from the header or the settings panel; the choice is persisted locally.
 
+### Quotes & Prompt Library
+
+- Quotes: the quote library shows in the sidebar and can be refreshed; content lives in `public/quotes.txt` (plain text, one line per quote, `#` for comments) and can be edited directly.
+- Prompts: the prompts for all seven tasks live in `public/prompts.txt` (each task starts with a dedicated `[task-name]` line); edit them directly and the next request picks them up; deleting a task block falls back to the built-in default prompt.
+
 ### AI Assistant
 
 - Chat about the selected passage or ask about the whole paper; the current selection is attached as context automatically.
 - One-click prompts: translate the selection, or explain it with the full paper as context.
 - Free-form questions can be sent with `Ctrl`/`Cmd` + Enter.
 - Two answer modes: `Flash` for fast translation and routine questions, `MAX 思考` for deeper explanation, summarization, and writing analysis.
-- Two providers: DeepSeek and the free Zhipu GLM 4.7 Flash model; each has its own API key and connection test.
+- Three providers: DeepSeek, the free Zhipu GLM 4.7 Flash model, and Kimi (`kimi-k2.5`); each has its own API key and connection test. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
 - Multi-turn conversations are grouped by page/selection; a question index lets you jump back to earlier turns; individual conversations can be deleted.
 - Translation, context explanation, concept explanation, free Q&A, reading notes, mind map, and writing analysis all use dedicated structured prompts.
 
@@ -52,6 +57,7 @@ Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click ins
 - All local data lives in SQLite at `data/papermate.db`: PDFs, text blocks, highlights, conversations, notes, and generated artifacts.
 - The database saves automatically; complete JSON backups are manual: backup now, restore from disk, export a backup file, and import one on another machine.
 - The settings panel shows and copies the backup file path.
+- API keys are stored separately in `data/apikey.txt` on this machine (plain text; `data/` is not committed to Git) and can be added/edited/deleted from the settings panel.
 - `data/`, `.env*`, and `papermate-backup-*.json` are ignored by `.gitignore`, so your papers, API keys, and exported backups are never pushed to GitHub accidentally.
 
 ### Windows One-Click Install / Update / Uninstall
@@ -64,7 +70,7 @@ Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click ins
 
 - Node.js 22.5 or newer (Node.js LTS recommended)
 - npm
-- A [DeepSeek API key](https://platform.deepseek.com/) or a free [Zhipu GLM API key](https://open.bigmodel.cn/) for model requests (either one)
+- A [DeepSeek API key](https://platform.deepseek.com/), a free [Zhipu GLM API key](https://open.bigmodel.cn/), or a [Kimi API key](https://platform.moonshot.cn/) for model requests (any one)
 - Windows 10/11 for the one-click installer; manual development works on any OS supported by Node.js and Next.js
 
 ## Quick Start
@@ -74,7 +80,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek or Zhipu GLM API key, and verify the connection.
+Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, Zhipu GLM, or Kimi API key, and verify the connection.
 
 ## Windows One-Click Install
 
@@ -84,7 +90,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek o
 
 ## Usage
 
-1. Open **设置 / Settings**, choose DeepSeek or Zhipu GLM, enter the API key, and verify the connection.
+1. Open **设置 / Settings**, choose DeepSeek, Zhipu GLM, or Kimi, enter the API key, and verify the connection.
 2. Drag a searchable PDF into the app, or click to choose a file.
 3. Read the original pages, zoom/pan as needed, and select a passage.
 4. Hold `Ctrl`/`Cmd` to add more fragments, then ask a question, translate the selection, or toggle **结合上下文解释**.
@@ -119,7 +125,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek o
 ## Privacy
 
 - PDFs, text blocks, selections, conversations, and generated content are stored in the local SQLite database at `data/papermate.db`. Complete JSON files are written to `data/papermate-backup.json` only when you use backup, export, or restore actions.
-- The API key stays in page memory and is not written to SQLite, backup files, exports, or server logs.
+- API keys are stored in plain text at `data/apikey.txt` on this machine (`data/` is not committed to Git, and the browser never holds the keys); they are only used for local model requests and are not written to backups, exports, or server logs.
 - The original PDF is never uploaded. Only the text excerpts needed for the current request are sent to the model provider.
 - The first release supports searchable PDFs only. OCR, DOCX, accounts, and cloud sync are not included.
 
@@ -128,7 +134,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek o
 - Only searchable PDFs with a text layer are supported; scanned PDFs and OCR are not supported.
 - DOCX and other document formats are not supported.
 - There is no account system or cloud sync; all data is stored locally.
-- Model requests depend on a valid DeepSeek or Zhipu GLM API key and network access.
+- Model requests depend on a valid DeepSeek, Zhipu GLM, or Kimi API key and network access.
 
 ## Project Structure
 
