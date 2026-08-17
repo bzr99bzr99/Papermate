@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  loadSystemPrompt,
   loadTaskInstructions,
   parsePromptsFile,
+  SYSTEM_PROMPT_DEFAULT,
   taskInstructions,
 } from "./prompts";
 
@@ -97,5 +99,17 @@ describe("task prompts", () => {
       path.join(os.tmpdir(), "papermate-prompts-does-not-exist.txt"),
     );
     expect(loaded).toEqual(taskInstructions);
+    expect(loadSystemPrompt(path.join(os.tmpdir(), "papermate-prompts-does-not-exist.txt"))).toBe(
+      SYSTEM_PROMPT_DEFAULT,
+    );
+  });
+
+  it("reads the [system] block as the base system prompt", () => {
+    const parsed = parsePromptsFile("[system]\n你是我的论文翻译助手。\n\n[translate]\n翻译。\n");
+    expect(parsed.system).toBe("你是我的论文翻译助手。");
+    expect(parsed.translate).toBe("翻译。");
+    const file = tempPromptsFile("[system]\n你是我的论文翻译助手。\n\n[translate]\n自定义翻译指令。\n");
+    expect(loadSystemPrompt(file)).toBe("你是我的论文翻译助手。");
+    expect(loadTaskInstructions(file).translate).toBe("自定义翻译指令。");
   });
 });

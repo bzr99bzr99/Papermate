@@ -2,6 +2,22 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [2.9.0] - 2026-08-16
+
+### Changed
+
+- Kimi provider upgraded to `kimi-k2.6` with a fallback model list (model availability may vary by account).
+- Prompts optimized across tasks.
+
+### Added
+
+- Generated results (reading notes, mind map, writing analysis) now keep version history: view, modify, or delete previously generated data; a failed generation never overwrites the existing data.
+- README interface overview gains a prompt-library screenshot.
+
+### Fixed
+
+- UX improvements and bug fixes.
+
 ## [2.8.0] - 2026-08-16
 
 ### Added

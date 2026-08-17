@@ -669,6 +669,34 @@ body.papermate-resizing .resize-handle { transition: none; }
 .primary-action { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; background: var(--accent); padding: 9px 11px; color: var(--on-accent); font-size: 11px; font-weight: 600; box-shadow: 0 5px 10px var(--shadow); }
 .artifact-actions { display: flex; gap: 6px; margin: 18px 0 10px; }
 .artifact-actions button { display: inline-flex; align-items: center; gap: 5px; }
+.artifact-actions button.artifact-delete { color: var(--danger); }
+.artifact-actions button.artifact-delete:hover { border-color: var(--danger); color: var(--danger); }
+.artifact-meta { margin: -4px 0 10px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 9px; }
+.artifact-versions { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 10px; }
+.artifact-versions-head { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.artifact-versions-head b { color: var(--accent); font-family: "DM Mono", monospace; font-size: 9px; }
+.artifact-versions-list { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.artifact-versions-list button { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); padding: 4px 7px; color: var(--ink-soft); font-family: "DM Mono", monospace; font-size: 9px; font-variant-numeric: tabular-nums; }
+.artifact-versions-list button:hover { border-color: var(--accent-strong); color: var(--accent); }
+.artifact-versions-list button.active { border-color: var(--accent-strong); background: var(--accent-soft); color: var(--accent); }
+.artifact-version-banner { display: flex; align-items: center; gap: 8px; margin: 18px 0 10px; padding: 7px 9px; border: 1px solid var(--accent-strong); border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 11px; }
+.artifact-version-banner span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-version-banner button { flex: 0 0 auto; margin-left: auto; border: 1px solid var(--line-dark); border-radius: 5px; background: var(--panel); padding: 4px 8px; color: var(--ink-soft); font-size: 10px; }
+.artifact-version-banner button:hover { border-color: var(--accent-strong); color: var(--accent); }
+.artifact-version-banner button.primary { border-color: var(--accent-strong); background: var(--accent); color: var(--panel); }
+.error-dialog { position: fixed; right: 18px; bottom: 18px; z-index: 30; width: min(370px, calc(100vw - 36px)); border: 1px solid var(--danger); border-radius: 10px; background: var(--panel); box-shadow: 0 14px 38px rgba(0, 0, 0, .24); padding: 12px 14px; color: var(--ink-soft); animation: error-dialog-in .22s ease; }
+@keyframes error-dialog-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.error-dialog-head { display: flex; align-items: center; gap: 7px; color: var(--danger); }
+.error-dialog-icon { display: inline-flex; flex: 0 0 auto; }
+.error-dialog-head strong { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.error-dialog-close { display: grid; flex: 0 0 auto; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); }
+.error-dialog-close:hover { background: var(--danger-soft); color: var(--danger); }
+.error-dialog-body { margin: 9px 0 11px; color: var(--ink-soft); font-size: 11.5px; line-height: 1.7; word-break: break-word; white-space: pre-wrap; max-height: 160px; overflow-y: auto; user-select: text; }
+.error-dialog-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.error-dialog-actions button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line-dark); border-radius: 6px; background: var(--panel); padding: 5px 10px; color: var(--ink-soft); font-size: 11px; }
+.error-dialog-actions button:hover { border-color: var(--accent-strong); color: var(--accent); }
+.error-dialog-actions button.primary { border-color: var(--danger); background: var(--danger); color: #fff; }
+.error-dialog-actions button.primary:hover { opacity: .9; color: #fff; }
 .artifact-md { flex: 1; min-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); padding: 14px 16px; color: var(--ink-soft); font-size: 12.5px; line-height: 1.8; }
 .artifact-md > :first-child { margin-top: 0; }
 .artifact-md > :last-child { margin-bottom: 0; }

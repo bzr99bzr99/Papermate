@@ -183,6 +183,12 @@ export interface Conversation {
   updatedAt: string;
 }
 
+export interface ArtifactVersion {
+  id: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface GeneratedArtifact {
   id: string;
   paperId: string;
@@ -191,6 +197,8 @@ export interface GeneratedArtifact {
   content: string;
   createdAt: string;
   updatedAt: string;
+  /** 之前生成的版本（最新在前）；重新生成成功后自动保存，也可手动保存。 */
+  versions?: ArtifactVersion[];
 }
 
 export interface PaperWorkspace {

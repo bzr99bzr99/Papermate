@@ -13,13 +13,16 @@ import {
 } from "react";
 import {
   Bot,
+  Bookmark,
   BookOpen,
   BrainCircuit,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   CircleHelp,
+  Clock,
   Copy,
   Download,
   FilePlus2,
@@ -101,6 +104,7 @@ import { loadReaderQuotes, READER_QUOTES } from "@/lib/quotes";
 import { blobSha256 } from "@/lib/source-hash";
 import type {
   ArtifactKind,
+  ArtifactVersion,
   ChatTurn,
   Conversation,
   GeneratedArtifact,
@@ -143,6 +147,8 @@ const THEMES: ThemeOption[] = [
 ];
 
 const blankWorkspace: PaperWorkspace = { annotations: [], conversations: [], artifacts: [] };
+// 每类成果最多保留的历史版本数（超出时丢弃最旧的）。
+const MAX_ARTIFACT_VERSIONS = 20;
 const artifactDetails: Record<ArtifactKind, { title: string; description: string; icon: typeof FileText }> = {
   notes: { title: "阅读笔记", description: "提炼问题、贡献、方法、证据与启发", icon: FileText },
   mindmap: { title: "论文脑图", description: "用可折叠的论证结构理解全篇", icon: Network },
@@ -391,6 +397,8 @@ export default function Home() {
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
   const [backfillingId, setBackfillingId] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  // 生成/发送失败时的警示弹层（可复制、可关闭，不遮挡阅读）。
+  const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
   const [dragPaperId, setDragPaperId] = useState<string>();
   const [dragOverId, setDragOverId] = useState<string>();
@@ -1457,13 +1465,26 @@ export default function Home() {
         updateConversation(currentConversation);
       });
     } catch (error) {
-      const content = `请求未完成：${error instanceof Error ? error.message : "未知错误"}`;
-      currentConversation = {
-        ...currentConversation,
-        turns: currentConversation.turns.map((turn) => (turn.id === assistantTurn.id ? { ...turn, content } : turn)),
-        updatedAt: new Date().toISOString(),
-      };
-      updateConversation(currentConversation);
+      // 发送失败：不把失败内容写入对话——复用会话时恢复发送前的状态（含被覆盖的旧问答），
+      // 新建的空会话整体移除；问题写回输入框，并弹出可复制的警示信息。
+      const reason = error instanceof Error ? error.message : "未知错误";
+      const latest = workspaceRef.current;
+      const stillExists = latest.conversations.some((item) => item.id === conversation.id);
+      if (stillExists && baseConversation) {
+        updateConversation(baseConversation);
+      } else if (stillExists) {
+        commitWorkspace({
+          ...latest,
+          conversations: latest.conversations.filter((item) => item.id !== conversation.id),
+        });
+        if (activeConversationId === conversation.id) setActiveConversationId(undefined);
+      }
+      // 输入框未被用户改写过时，把失败内容写回聊天框。
+      setQuestion((currentValue) => (currentValue.trim() ? currentValue : requestedQuestion));
+      setErrorDialog({
+        title: "消息发送失败",
+        message: `${reason}`,
+      });
     } finally {
       endChat(currentConversation.id);
     }
@@ -1487,7 +1508,13 @@ export default function Home() {
     await persistApiKeys();
     startKind(kind, paper.id);
     const details = artifactDetails[kind];
-    const draft: GeneratedArtifact = {
+    const base = workspaceRef.current;
+    // 保留已有成果：重新生成时沿用原记录（同 id），流式更新内容；
+    // 若生成失败则恢复原内容，绝不覆盖原本数据，只提示失败原因。
+    const existing = base.artifacts.find((item) => item.kind === kind);
+    const previousContent = existing?.content ?? "";
+    const previousVersions = existing?.versions ?? [];
+    let artifact: GeneratedArtifact = existing ?? {
       id: uid(),
       paperId: paper.id,
       kind,
@@ -1496,9 +1523,7 @@ export default function Home() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    let artifact = draft;
-    const base = workspaceRef.current;
-    const start = { ...base, artifacts: [draft, ...base.artifacts.filter((item) => item.kind !== kind)] };
+    const start = { ...base, artifacts: [artifact, ...base.artifacts.filter((item) => item.kind !== kind)] };
     commitWorkspace(start);
     try {
       await streamResponse(kind, `请分析《${paper.title}》。`, documentContext(paper), [], (content) => {
@@ -1506,13 +1531,76 @@ export default function Home() {
         const current = workspaceRef.current;
         commitWorkspace({ ...current, artifacts: [artifact, ...current.artifacts.filter((item) => item.kind !== kind)] });
       });
+      // 生成成功：把生成前的内容自动保存为历史版本（内容与最新版本相同则跳过，避免重复）。
+      if (existing && previousContent.trim()) {
+        const newest = previousVersions[0];
+        const nextVersions: ArtifactVersion[] =
+          newest && newest.content === previousContent
+            ? previousVersions
+            : [
+                { id: uid(), content: previousContent, createdAt: existing.updatedAt },
+                ...previousVersions,
+              ].slice(0, MAX_ARTIFACT_VERSIONS);
+        const withVersions = { ...artifact, versions: nextVersions };
+        artifact = withVersions;
+        const current = workspaceRef.current;
+        commitWorkspace({ ...current, artifacts: [withVersions, ...current.artifacts.filter((item) => item.kind !== kind)] });
+      }
     } catch (error) {
-      artifact = { ...artifact, content: `生成失败：${error instanceof Error ? error.message : "未知错误"}`, updatedAt: new Date().toISOString() };
+      // 生成失败：恢复原有内容（或移除本次新建的空草稿），弹警示信息说明原因。
+      const reason = error instanceof Error ? error.message : "未知错误";
       const current = workspaceRef.current;
-      commitWorkspace({ ...current, artifacts: [artifact, ...current.artifacts.filter((item) => item.kind !== kind)] });
+      if (existing) {
+        const restored: GeneratedArtifact = {
+          ...artifact,
+          content: previousContent,
+          updatedAt: existing.updatedAt,
+        };
+        commitWorkspace({
+          ...current,
+          artifacts: current.artifacts.map((item) => (item.id === artifact.id ? restored : item)),
+        });
+      } else {
+        commitWorkspace({
+          ...current,
+          artifacts: current.artifacts.filter((item) => item.id !== artifact.id),
+        });
+      }
+      setErrorDialog({ title: `${details.title}生成失败`, message: reason });
     } finally {
       finishKind(kind, paper?.id);
     }
+  }
+
+  function deleteArtifact(kind: ArtifactKind) {
+    const base = workspaceRef.current;
+    if (!base.artifacts.some((item) => item.kind === kind)) return;
+    if (!window.confirm(`确定删除「${artifactDetails[kind].title}」吗？删除后无法恢复。`)) return;
+    commitWorkspace({ ...base, artifacts: base.artifacts.filter((item) => item.kind !== kind) });
+    setNotice(`已删除「${artifactDetails[kind].title}」。`);
+  }
+
+  function saveArtifactVersion(kind: ArtifactKind) {
+    const base = workspaceRef.current;
+    const current = base.artifacts.find((item) => item.kind === kind);
+    if (!current || !current.content.trim()) return;
+    const versions = current.versions ?? [];
+    const newest = versions[0];
+    if (newest && newest.content === current.content) {
+      setNotice("当前内容已是最近保存的版本，无需重复保存。");
+      return;
+    }
+    const nextVersion: ArtifactVersion = {
+      id: uid(),
+      content: current.content,
+      createdAt: new Date().toISOString(),
+    };
+    const next: GeneratedArtifact = {
+      ...current,
+      versions: [nextVersion, ...versions].slice(0, MAX_ARTIFACT_VERSIONS),
+    };
+    commitWorkspace({ ...base, artifacts: base.artifacts.map((item) => (item.id === next.id ? next : item)) });
+    setNotice(`已保存「${artifactDetails[kind].title}」当前版本。`);
   }
 
   function editArtifact(kind: ArtifactKind, content: string) {
@@ -1955,6 +2043,8 @@ export default function Home() {
               generating={runningKinds.has(rightView) || glmLocked}
               onGenerate={() => void generateArtifact(rightView)}
               onEdit={(content) => editArtifact(rightView, content)}
+              onDelete={() => deleteArtifact(rightView)}
+              onSaveVersion={() => saveArtifactVersion(rightView)}
             />
           )}
         </aside>
@@ -1991,6 +2081,29 @@ export default function Home() {
         onImportBackup={(file) => void importBackupFile(file)}
         onCopyPath={(ok) => setNotice(ok ? "备份文件路径已复制到剪贴板。" : "无法复制路径，请手动复制上方文件位置。")}
       />
+      {errorDialog ? (
+        <div className="error-dialog" role="alertdialog" aria-label={errorDialog.title}>
+          <div className="error-dialog-head">
+            <span className="error-dialog-icon"><CircleAlert size={16} /></span>
+            <strong>{errorDialog.title}</strong>
+            <button type="button" className="error-dialog-close" aria-label="关闭" title="关闭" onClick={() => setErrorDialog(null)}><X size={15} /></button>
+          </div>
+          <p className="error-dialog-body">{errorDialog.message}</p>
+          <div className="error-dialog-actions">
+            <button
+              type="button"
+              onClick={() => {
+                void copyTextToClipboard(errorDialog.message).catch(() =>
+                  setNotice("复制失败，请手动选择错误信息文本。"),
+                );
+              }}
+            >
+              <Copy size={14} /> 复制错误信息
+            </button>
+            <button type="button" className="primary" onClick={() => setErrorDialog(null)}>关闭</button>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -2112,7 +2225,7 @@ function ModelSwitch({ mode, setMode, provider, setProvider }: {
       </div>
       <div className="model-switch provider-switch" role="group" aria-label="模型服务商">
         <button className={provider === "glm" ? "active" : ""} onClick={() => setProvider("glm")}><Sparkles size={12} /><span>GLM 免费</span></button>
-        <button className={provider === "kimi" ? "active" : ""} onClick={() => setProvider("kimi")}><Moon size={12} /><span>Kimi K2.5</span></button>
+        <button className={provider === "kimi" ? "active" : ""} onClick={() => setProvider("kimi")}><Moon size={12} /><span>Kimi K2.6</span></button>
         <button className={provider === "deepseek" ? "active" : ""} onClick={() => setProvider("deepseek")}><Zap size={12} /><span>DeepSeek</span></button>
       </div>
     </div>
@@ -2193,7 +2306,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   const colorMode = conversation ? "会话" : "下一次提问";
 
   return <div className="chat-panel">
-    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{provider === "glm" ? "GLM 4.7 Flash" : provider === "kimi" ? "Kimi K2.5" : "DeepSeek Flash"}</span></div>
+    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{provider === "glm" ? "GLM 4.7 Flash" : provider === "kimi" ? "Kimi K2.6" : "DeepSeek Flash"}</span></div>
     <details className="question-index">
       <summary><MessageCircleMore size={14} /> 提问索引 <b>{indexItems.length}</b></summary>
       {indexItems.length ? (
@@ -2329,46 +2442,99 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
         </div>
       )) : <div className="chat-empty"><CircleHelp size={22} /><p>选中一句话，或提出关于整篇论文的问题。</p></div>}
     </div>
-    <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") onPrompt(contextMode ? "context" : "free"); }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
-    <p className="input-hint">{contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "⌘ / Ctrl + Enter 发送 · 回答优先依据论文原文"}</p>
+    <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onPrompt(contextMode ? "context" : "free"); } }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
+    <p className="input-hint">{contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "Enter 发送 · Shift + Enter 换行 · 回答优先依据论文原文"}</p>
   </div>;
 }
 
-function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit }: {
+function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, onDelete, onSaveVersion }: {
   kind: ArtifactKind;
   paper: Paper;
   artifact?: GeneratedArtifact;
   generating: boolean;
   onGenerate: () => void;
   onEdit: (content: string) => void;
+  onDelete: () => void;
+  onSaveVersion: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [viewingVersionId, setViewingVersionId] = useState<string | undefined>(undefined);
   const lastArtifactId = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (artifact?.id && artifact.id !== lastArtifactId.current) {
       lastArtifactId.current = artifact.id;
       setEditing(false);
+      setViewingVersionId(undefined);
     }
   }, [artifact?.id]);
+  // 生成结束后回到当前版本视图。
+  const wasGenerating = useRef(false);
+  useEffect(() => {
+    if (wasGenerating.current && !generating) setViewingVersionId(undefined);
+    wasGenerating.current = generating;
+  }, [generating]);
   const details = artifactDetails[kind];
   const Icon = details.icon;
-  const svg = kind === "mindmap" && artifact?.content ? mindMapToSvg(markdownToMindMap(artifact.content, paper.title)) : undefined;
+  const versions = artifact?.versions ?? [];
+  const viewingVersion = viewingVersionId
+    ? versions.find((version) => version.id === viewingVersionId)
+    : undefined;
+  const displayedContent = viewingVersion ? viewingVersion.content : artifact?.content;
+  const svg = kind === "mindmap" && displayedContent ? mindMapToSvg(markdownToMindMap(displayedContent, paper.title)) : undefined;
   const download = () => {
-    if (!artifact) return;
-    const base = `${paper.title}-${details.title}`.replace(/[\\/:*?"<>|]/g, "-");
+    if (!artifact || !displayedContent) return;
+    const stamp = viewingVersion
+      ? `-历史版本-${viewingVersion.createdAt.slice(0, 10)}`
+      : "";
+    const base = `${paper.title}-${details.title}${stamp}`.replace(/[\\/:*?"<>|]/g, "-");
     if (kind === "mindmap" && svg) downloadFile(`${base}.svg`, svg, "image/svg+xml");
-    else downloadFile(`${base}.md`, artifact.content, "text/markdown;charset=utf-8");
+    else downloadFile(`${base}.md`, displayedContent, "text/markdown;charset=utf-8");
   };
   return <div className="artifact-panel">
     <div className="panel-heading"><span className="panel-icon"><Icon size={17} /></span><div><h2>{details.title}</h2><p>{details.description}</p></div></div>
     {!artifact?.content && !generating ? <div className="artifact-empty"><Icon size={28} /><h3>从这篇论文开始提炼</h3><p>将使用全文文本进行深度分析，生成结果自动保存到本机论文库。</p><button className="primary-action" onClick={onGenerate}><Sparkles size={16} /> 生成{details.title}</button></div> : <>
-      <div className="artifact-actions">
-        <button disabled={generating} onClick={onGenerate}>{generating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{generating ? "正在分析" : "重新生成"}</button>
-        <button disabled={!artifact?.content} onClick={download}><Download size={15} /> 保存本地</button>
-        {artifact?.content ? <button disabled={generating} onClick={() => setEditing((value) => !value)}>{editing ? "完成编辑" : "编辑文本"}</button> : null}
-      </div>
+      {viewingVersion ? (
+        <div className="artifact-version-banner">
+          <span><Clock size={13} /> 正在查看历史版本 · {readableDateTime(viewingVersion.createdAt)}</span>
+          <button type="button" onClick={download}><Download size={13} /> 下载此版本</button>
+          <button type="button" className="primary" onClick={() => setViewingVersionId(undefined)}>返回当前版本</button>
+        </div>
+      ) : (
+        <div className="artifact-actions">
+          <button disabled={generating} onClick={onGenerate}>{generating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{generating ? "正在分析" : "重新生成"}</button>
+          <button disabled={!artifact?.content} onClick={download}><Download size={15} /> 保存本地</button>
+          {artifact?.content ? <button disabled={generating} onClick={onSaveVersion}><Bookmark size={15} /> 保存版本</button> : null}
+          {artifact?.content ? <button disabled={generating} onClick={() => setEditing((value) => !value)}>{editing ? "完成编辑" : "编辑文本"}</button> : null}
+          {artifact?.content ? <button className="artifact-delete" disabled={generating} onClick={onDelete}><Trash2 size={15} /> 删除</button> : null}
+        </div>
+      )}
+      {versions.length ? (
+        <div className="artifact-versions">
+          <div className="artifact-versions-head"><Clock size={11} /> 历史版本 <b>{versions.length}</b></div>
+          <div className="artifact-versions-list">
+            {versions.slice(0, MAX_ARTIFACT_VERSIONS).map((version) => (
+              <button
+                key={version.id}
+                type="button"
+                className={viewingVersionId === version.id ? "active" : ""}
+                title={version.createdAt}
+                onClick={() => setViewingVersionId(viewingVersionId === version.id ? undefined : version.id)}
+              >
+                {readableDateTime(version.createdAt)}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {artifact ? <p className="artifact-meta">生成于 {artifact.createdAt ? readableDateTime(artifact.createdAt) : ""} · 最后更新 {artifact.updatedAt ? readableDateTime(artifact.updatedAt) : ""}</p> : null}
       {kind === "mindmap" && svg && <div className="mindmap-preview" dangerouslySetInnerHTML={{ __html: svg }} />}
-      {editing ? (
+      {viewingVersion ? (
+        <div className="artifact-md md-body">
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+            {viewingVersion.content}
+          </ReactMarkdown>
+        </div>
+      ) : editing ? (
         <textarea className="artifact-editor" value={artifact?.content ?? ""} placeholder="正在生成内容…" onChange={(event) => onEdit(event.target.value)} />
       ) : (
         <div className="artifact-md md-body">
@@ -2473,7 +2639,7 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                     {glmState === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
                   </section>
                   <section className="settings-api-card">
-                    <div className="settings-api-title"><Moon size={17} /><div><b>Kimi K2.5</b><span>长上下文深度推理，可切换快速/深度思考</span></div></div>
+                    <div className="settings-api-title"><Moon size={17} /><div><b>Kimi K2.6</b><span>长上下文深度推理，可切换快速/深度思考</span></div></div>
                     <label>Moonshot API Key<input type="password" value={kimiApiKey} onChange={(event) => setKimiApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (kimiApiKey.trim()) onClose(); } }} placeholder="sk-…" autoComplete="off" /></label>
                     <button className="test-key" disabled={!kimiApiKey.trim() || kimiState === "testing"} onClick={onTestKimi}>{kimiState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{kimiState === "testing" ? "验证中" : "验证连接"}</button>
                     {kimiState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}

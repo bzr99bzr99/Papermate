@@ -41,7 +41,7 @@ Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click ins
 - One-click prompts: translate the selection, or explain it with the full paper as context.
 - Free-form questions can be sent with `Ctrl`/`Cmd` + Enter.
 - Two answer modes: `Flash` for fast translation and routine questions, `MAX 思考` for deeper explanation, summarization, and writing analysis.
-- Three providers: DeepSeek, the free Zhipu GLM 4.7 Flash model, and Kimi (`kimi-k2.5`); each has its own API key and connection test. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
+- Three providers: DeepSeek, the free Zhipu GLM 4.7 Flash model, and Kimi (`kimi-k2.6`); each has its own API key and connection test. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
 - Multi-turn conversations are grouped by page/selection; a question index lets you jump back to earlier turns; individual conversations can be deleted.
 - Translation, context explanation, concept explanation, free Q&A, reading notes, mind map, and writing analysis all use dedicated structured prompts.
 
@@ -51,6 +51,7 @@ Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click ins
 - **Mind map**: a collapsible argument-structure map of the paper, previewed in the app and downloadable as an SVG image.
 - **Writing analysis**: a writing-strategy breakdown covering the argument chain, section duties, paragraph progression, results/discussion split, language and evidence strength, and reusable frameworks.
 - Results are editable, re-generable, downloadable as `.md` or `.svg`, and saved to the local paper library.
+- Each artifact type keeps version history: view, modify, or delete previously generated data; a failed generation never overwrites the existing data.
 
 ### Storage & Backup
 
@@ -109,6 +110,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 | ![Reading notes](截图/阅读笔记.png) | Generated reading notes with page-referenced evidence, glossary, and transferable insights. |
 | ![Mind map](截图/论文脑图.png) | Collapsible argument-structure mind map, exportable as SVG. |
 | ![Writing analysis](截图/写作思路.png) | Writing-strategy analysis with argument chain, section duties, and reusable frameworks. |
+| ![Prompt library](截图/提示词.png) | Prompt library: edit `public/prompts.txt` directly; changes apply on the next request. |
 
 ## Saving Results
 
