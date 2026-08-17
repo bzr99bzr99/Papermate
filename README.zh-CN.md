@@ -1,3 +1,9 @@
+<div align="center">
+
+**🌐 语言切换：简体中文** · [English](README.md)
+
+</div>
+
 # PaperMate
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -6,7 +12,7 @@
 
 PaperMate 是一个本地优先、AI 辅助的论文阅读工具。导入带文本层的可检索 PDF 后，会按原版页面逐页展示，可以直接在透明文本层上划选段落进行多轮问答，也可以生成阅读笔记、论文脑图和写作思路分析。
 
-英文介绍见 [README.md](README.md)。Windows 一键安装详见 [安装说明.md](安装说明.md) 和 [INSTALL.md](INSTALL.md)。功能与版本历史详见 [功能日志.md](功能日志.md) 与 [CHANGELOG.md](CHANGELOG.md)。
+Windows 一键安装详见 [安装说明.md](安装说明.md) 和 [INSTALL.md](INSTALL.md)。功能与版本历史详见 [功能日志.md](功能日志.md) 与 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 功能
 

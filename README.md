@@ -1,12 +1,18 @@
+<div align="center">
+
+**🌐 Language: English** · [简体中文](README.zh-CN.md)
+
+</div>
+
 # PaperMate
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen)
 ![Next.js](https://img.shields.io/badge/Next.js-15-black)
 
-PaperMate is a local-first, AI-assisted PDF reading tool for academic papers. Import a searchable PDF, read it in its original page layout, select passages directly on the page, and ask DeepSeek or the free Zhipu GLM model to translate, explain, answer questions, or generate reading notes, argument maps, and writing analysis.
+PaperMate is a local-first, AI-assisted PDF reading tool for academic papers. Import a searchable PDF, read it in its original page layout, select passages directly on the page, and ask DeepSeek, the free Zhipu GLM model, or Kimi to translate, explain, answer questions, or generate reading notes, argument maps, and writing analysis.
 
-Chinese users can read [README.zh-CN.md](README.zh-CN.md). Windows one-click installation is documented in [安装说明.md](安装说明.md) and [INSTALL.md](INSTALL.md). Feature and version history is tracked in [功能日志.md](功能日志.md) (Chinese) and [CHANGELOG.md](CHANGELOG.md) (English).
+Windows one-click installation is documented in [安装说明.md](安装说明.md) and [INSTALL.md](INSTALL.md). Feature and version history is tracked in [功能日志.md](功能日志.md) (Chinese) and [CHANGELOG.md](CHANGELOG.md) (English).
 
 ## Features
 
