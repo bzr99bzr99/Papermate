@@ -109,14 +109,14 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 
 | Screen | Description |
 | --- | --- |
-| ![Library home](截图/首页.png) | Paper library: import PDFs, search papers, view metadata and notes, drag/pin papers, and check backup status. |
-| ![Reading and selection](截图/辅助阅读.png) | Original-page reader with a transparent text layer, zoom/pan, chapter outline, and clickable citation/figure links. |
-| ![Translation and chat](截图/辅助阅读翻译.png) | Translate or explain the selected passage, then continue with multi-turn questions; answers reference source pages. |
-| ![Settings](截图/设置.png) | Unified settings panel: model providers and API key verification, reading themes, and complete JSON backup management. |
-| ![Theme selection](截图/皮肤选择.png) | Switch reading themes from the header; the choice is saved locally. |
-| ![Reading notes](截图/阅读笔记.png) | Generated reading notes with page-referenced evidence, glossary, and transferable insights. |
-| ![Mind map](截图/论文脑图.png) | Collapsible argument-structure mind map, exportable as SVG. |
-| ![Writing analysis](截图/写作思路.png) | Writing-strategy analysis with argument chain, section duties, and reusable frameworks. |
+| ![Library home](截图/首页.png) | Paper library: import PDFs, search, notes, pin-to-top and drag reordering, and backup status. |
+| ![Reading and selection](截图/辅助阅读.png) | Original-page reader: one-click chapter outline jumps, "拾句" random quotes, and a transparent text layer for precise selection. |
+| ![Q&A](截图/问答.png) | Selected passage with multi-turn Q&A: translation, context explanation, detailed explanation, and a question index to jump back. |
+| ![Settings](截图/设置.png) | Settings: DeepSeek / GLM / Kimi connection tests, reading themes, and local backup management. |
+| ![Reading notes](截图/阅读笔记.png) | Reading notes with page-referenced evidence. |
+| ![Mind map](截图/论文脑图.png) | Collapsible argument-structure mind map. |
+| ![Writing analysis](截图/写作思路.png) | Writing-strategy analysis with reusable paragraph and sentence frameworks. |
+| ![Reading companion](截图/陪读小人.png) | Reading companion: company, random quotes, persona switching, and chatty-level control. |
 | ![Prompt library](截图/提示词.png) | Prompt library: edit `public/prompts.txt` directly; changes apply on the next request. |
 
 ## Saving Results
@@ -126,8 +126,8 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 - Generated artifacts are also saved to the local SQLite database, so they survive browser cache clearing while the project folder is preserved.
 - The settings panel provides full-library JSON backup: backup now, restore from disk, export a backup file, and import one on another machine.
 - Sample outputs are included under `截图/`:
-  - [Reading notes sample](截图/阅读笔记.md)
-  - [Writing analysis sample](截图/写作思路.md)
+  - [Reading notes sample](截图/1706.03762v7-阅读笔记.md)
+  - [Writing analysis sample](截图/1706.03762v7-写作思路.md)
   - [Mind map SVG sample](截图/论文脑图.svg)
 - Backup JSON files created by the app (for example `papermate-backup-2026-08-16.json`) contain your library data and are excluded by `.gitignore`; keep them local and never commit them.
 
