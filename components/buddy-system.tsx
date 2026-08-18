@@ -363,30 +363,7 @@ function DoctorBuddy({ level }: { level: number }) {
   );
 }
 
-/* ---------- 1-Bit 像素画（梦境论文 / 拍立得） ---------- */
-function drawPaper(g: CanvasRenderingContext2D, ink: string) {
-  const cells: string[] = [
-    "################",
-    "#..............#",
-    "#..####..#####.#",
-    "#..............#",
-    "#..##...##..##.#",
-    "#..##...##..##.#",
-    "#..####.####..#",
-    "#..##...##..##.#",
-    "#..##...##..##.#",
-    "#..............#",
-    "#..ACC.ACCEPT.#",
-    "################",
-  ];
-  g.fillStyle = ink;
-  cells.forEach((row, y) => {
-    [...row].forEach((ch, x) => {
-      if (ch === "#") g.fillRect(x * SCALE, y * SCALE, SCALE, SCALE);
-    });
-  });
-}
-
+/* ---------- 1-Bit 像素画（拍立得） ---------- */
 function drawPolaroid(g: CanvasRenderingContext2D, ink: string, index: number) {
   const cells: string[] = [
     "##############",
@@ -518,11 +495,14 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
   const posRef = useRef(pos);
   posRef.current = pos;
 
-  /* 说话气泡 */
+  /* 说话气泡：新内容直接覆盖旧内容（setSpeech 立即替换 + 重置计时器）；
+     nonce 作为气泡 key，让每次新内容触发重新入场动画，切换清晰可见 */
   const [speech, setSpeech] = useState<string | null>(null);
   const speechTimerRef = useRef(0);
-  const speak = useCallback((text: string, duration = 4200) => {
+  const speechNonceRef = useRef(0);
+  const speak = useCallback((text: string, duration = 7000) => {
     setSpeech(text);
+    speechNonceRef.current += 1;
     window.clearTimeout(speechTimerRef.current);
     speechTimerRef.current = window.setTimeout(() => setSpeech(null), duration);
   }, []);
@@ -560,7 +540,7 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
           text = retryData.text?.trim() ?? text;
         }
         recentLinesRef.current = [...recentLinesRef.current.slice(-(BUDDY_RECENT_LIMIT - 1)), text];
-        speak(text, 5500);
+        speak(text, 8500);
       } catch {
         /* 静默 */
       }
@@ -597,6 +577,7 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
       const delay = base * (1 + Math.random() * 0.6);
       timer = window.setTimeout(() => {
         if (stateRef.current === "idle" && Math.random() < randomRateFor(talkRef.current)) {
+          // 闲聊不带任何上下文，就是纯粹的闲聊状态
           void speakBuddy("idle");
         }
         schedule();
@@ -822,7 +803,7 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
       } catch {
         /* 忽略 */
       }
-      speak(PERSONA_SWITCH_LINES[next], 4500);
+      speak(PERSONA_SWITCH_LINES[next], 7000);
     },
     [speak],
   );
@@ -839,7 +820,7 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
         <div className="buddy-overlay">
           {sleeping && !dreaming && <span className="buddy-z" key={`z-${zLevel}`}>{zText}</span>}
           {wakeBurst && <span className="buddy-wake">!</span>}
-          {speech && <div className="buddy-speech">{speech}</div>}
+          {speech && <div key={speechNonceRef.current} className="buddy-speech">{speech}</div>}
           {banner && (
             <div className="buddy-banner" key={banner.key}>
               <strong>{banner.title}</strong>
@@ -869,22 +850,17 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
           )}
           {dreaming && (
             <div className="buddy-dream" key="dream">
-              <div className="buddy-dream-canvas-wrap">
-                <canvas
-                  width={16 * SCALE}
-                  height={12 * SCALE}
-                  ref={(node) => {
-                    if (node) {
-                      const g = node.getContext("2d");
-                      if (g) {
-                        g.clearRect(0, 0, node.width, node.height);
-                        drawPaper(g, ink);
-                      }
-                    }
-                  }}
-                />
+              {/* 写实风论文接收通知卡（替代 1-bit 像素画） */}
+              <div className="buddy-dream-card">
+                <span className="buddy-dream-card-seal"><i>已接收</i>ACCEPTED</span>
+                <span className="buddy-dream-card-kicker">PAPERMATE JOURNAL</span>
+                <strong>论文接收通知</strong>
+                <p>恭喜！您的论文已被期刊正式接收，无需任何修改。</p>
+                <div className="buddy-dream-card-footer">
+                  <span>Ref. PM-2026-0819 · 编辑部</span>
+                  <span className="buddy-dream-card-sign">Accept with No Revisions</span>
+                </div>
               </div>
-              <span className="buddy-dream-label">Accept with No Revisions</span>
             </div>
           )}
         </div>

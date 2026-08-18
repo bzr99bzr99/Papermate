@@ -2175,15 +2175,16 @@ body::after {
   right: -8px;
   align-items: flex-end;
 }
-/* 说话气泡（AI 陪读接口） */
+/* 说话气泡（AI 陪读接口）：最小宽度让短句也呈扁平气泡，避免竖长 */
 .buddy-speech {
   position: relative;
-  max-width: min(360px, calc(100vw - 32px));
+  min-width: 210px;
+  max-width: min(400px, calc(100vw - 32px));
   border: 2px solid var(--ink);
   border-radius: 12px;
   background: var(--panel);
   color: var(--ink);
-  padding: 9px 12px;
+  padding: 10px 13px;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -2250,16 +2251,15 @@ body::after {
   background: var(--panel);
   box-shadow: 3px 3px 0 color-mix(in srgb, var(--ink) 22%, transparent);
 }
-/* 梦境泡泡 */
+/* 梦境泡泡：写实风论文接收通知卡 */
 .buddy-dream {
   position: relative;
   display: grid;
   justify-items: center;
-  gap: 5px;
   border: 2px solid var(--ink);
   border-radius: 14px;
   background: var(--panel);
-  padding: 9px 11px 7px;
+  padding: 8px 11px 8px;
   box-shadow: 4px 4px 0 color-mix(in srgb, var(--ink) 22%, transparent);
   animation: buddy-bubble-in .5s var(--ease-spring) both;
 }
@@ -2271,18 +2271,121 @@ body::after {
   border: 6px solid transparent;
   border-top-color: var(--ink);
 }
-.buddy-dream-canvas-wrap { border: 1px solid var(--line-dark); animation: buddy-flash 1.1s ease-in-out infinite; }
-.buddy-dream canvas { display: block; }
-.buddy-dream-label {
+/* 写实接收通知卡：信纸质感 + 金色刊头 + 朱红印章 */
+.buddy-dream-card {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  width: 224px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 55%, transparent);
+  border-radius: 8px;
+  background:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 1.6%, transparent) 0 1px, transparent 1px 3px),
+    linear-gradient(160deg, color-mix(in srgb, #fff 55%, var(--panel)) 0%, var(--panel) 100%);
+  padding: 12px 13px 10px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .5), 0 4px 12px var(--shadow);
+  animation: buddy-flash 1.1s ease-in-out infinite;
+}
+/* 顶部金色刊头线 */
+.buddy-dream-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 10px;
+  right: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, transparent, #c8a24b 22%, #c8a24b 78%, transparent);
+}
+.buddy-dream-card-kicker {
+  margin-top: 2px;
+  color: #a8842f;
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: .22em;
+}
+.buddy-dream-card-kicker::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #c8a24b;
+  vertical-align: 1px;
+}
+.buddy-dream-card strong {
   color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-family: "Noto Serif SC", Georgia, serif;
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.buddy-dream-card p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-family: "Noto Serif SC", Georgia, serif;
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+.buddy-dream-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 3px;
+  padding-top: 6px;
+  border-top: 1px dashed color-mix(in srgb, var(--ink) 22%, transparent);
+  color: var(--muted);
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: 7.5px;
   white-space: nowrap;
-  letter-spacing: .04em;
+}
+.buddy-dream-card-sign {
+  color: #a8842f;
+  font-style: italic;
+  letter-spacing: .02em;
+}
+/* 朱红双圈印章（右上角，旋转压角；内圈 + 已接收小字） */
+.buddy-dream-card-seal {
+  position: absolute;
+  top: 16px;
+  right: -8px;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  border: 1.8px solid #b23a2e;
+  border-radius: 4px;
+  color: #b23a2e;
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  line-height: 1;
+  padding: 4px 5px;
+  transform: rotate(-9deg);
+  opacity: .92;
+  pointer-events: none;
+}
+.buddy-dream-card-seal::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border: 1px solid color-mix(in srgb, #b23a2e 55%, transparent);
+  border-radius: 2px;
+}
+.buddy-dream-card-seal i {
+  font-style: normal;
+  font-size: 6.5px;
+  font-weight: 700;
+  letter-spacing: .34em;
+  padding-left: .34em;
+  opacity: .9;
 }
 @keyframes buddy-flash {
   0%, 100% { filter: brightness(1); }
-  50% { filter: brightness(1.7); }
+  50% { filter: brightness(1.12); }
 }
 @keyframes buddy-bubble-in {
   from { opacity: 0; transform: scale(.6) translateY(10px); }
@@ -2551,7 +2654,7 @@ body::after {
 @media (prefers-reduced-motion: reduce) {
   .buddy-z,
   .buddy-dream,
-  .buddy-dream-canvas-wrap,
+  .buddy-dream-card,
   .buddy-wake,
   .buddy-banner,
   .buddy-spark,
