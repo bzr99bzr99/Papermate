@@ -2,6 +2,23 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [3.0.0] - 2026-08-16
+
+### Added
+
+- AI reading companion (陪读小人): five personas (sarcastic, gentle, philosophical, encouraging, mentor) that react to question types and completed answers; can be hidden entirely (fully unloaded, no model requests); persona prompts are editable at `public/buddy-personas.txt` (cached by file mtime) with local fallback lines when no API key is available.
+- Twenty reading themes (ten new ones, e.g., classified archive and e-ink).
+- GLM dual-tier models: `glm-4-flash` (free, officially supports high concurrency) as the primary GLM model, with `glm-4.7-flash` as its fallback (and vice versa).
+
+### Changed
+
+- Prompts optimized (tasks and companion personas).
+- UI polish and visual refinements.
+
+### Fixed
+
+- Various bug fixes.
+
 ## [2.9.0] - 2026-08-16
 
 ### Changed

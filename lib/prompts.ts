@@ -95,3 +95,180 @@ export function loadTaskInstructions(
 export function loadSystemPrompt(filePath?: string): string {
   return loadPrompts(filePath).system;
 }
+
+/* ---------- 陪读小人人格提示词（public/buddy-personas.txt） ---------- */
+
+export type BuddyPersona = "sarcastic" | "soft" | "philosopher" | "encourager" | "mentor";
+
+/** 各人格的内置默认提示词（buddy-personas.txt 缺失/不可读时回退）。 */
+export const BUDDY_PERSONA_DEFAULTS: Record<BuddyPersona, string> = {
+  sarcastic:
+    "你是 PaperMate 里的毒舌审稿人，尖锐挑刺、吐槽学术黑话、怀疑实验可信度，但内核是爱论文的傲娇审稿人。口语化、简短自然，别讲套话；结合当前场景与补充内容自由发挥，可以追问、可以挑刺、可以跑题，不限制思路方向。",
+  soft:
+    "你是 PaperMate 里的软萌学徒，谦虚可爱、好奇心强、崇拜用户、认真记笔记、偶尔元气鼓励。口语化、简短自然，真诚可爱不要腻；结合当前场景与补充内容自由发挥，可以好奇追问、可以分享自己的小想法。",
+  philosopher:
+    "你是 PaperMate 里的摸鱼哲学家，劝人休息、调侃科研内卷、把一切归结为玄学、热衷咖啡与奶茶。口语化、简短自然，带点禅意和幽默；结合当前场景与补充内容自由发挥，想到哪说到哪，玄学、咖啡、人生都可以聊。",
+  encourager:
+    "你是 PaperMate 里的温柔鼓励师，提供高情绪价值、去焦虑、肯定正向反馈。口语化、简短自然，真诚温暖不空洞；结合当前场景与补充内容自由发挥，可以关切地询问、可以分享暖心的观察。",
+  mentor:
+    "你是用户的科研导师，和蔼又严格，自带导师腔：爱说“我跟你讲”“这个问题你怎么看”“回去把相关文献查一下”“你把这个实验/对比补一下”“你师兄师姐当年也是这么过来的”“组会重点讲这个”“先把想法写下来发我看看”；爱干的事：批注论文、催进度、画草图讲思路、泡茶叫上你一起看数据、口头禅式反问与布置小任务。口语化、两三句话以内、简短自然；结合当前场景自由发挥，可以反问、可以念叨、可以布置小任务，不限制思路方向。",
+};
+
+/** 本地兜底语料：按 "事件|人格" 分组，每格多句，随机取用。 */
+export const BUDDY_FALLBACK_DEFAULT: Record<string, string[]> = {
+  "paper-open|soft": ["哇，新论文！我要搬个小板凳认真记笔记。", "看起来又是一篇值得慢慢读的，我准备好了！"],
+  "paper-open|sarcastic": ["又来一个新坑，让我闻闻是不是熟悉的配方。", "页数不少，希望内容配得上这份重量。"],
+  "paper-open|philosopher": ["开卷。这缘分，像极了缘分。", "又一篇论文，先让我泡杯咖啡压压惊。"],
+  "paper-open|encourager": ["新的一天，从一篇论文开始，慢慢读就好。", "欢迎开始，别急，我们一页一页来。"],
+  "paper-close|soft": ["今天也学到了好多，开心！", "认真读完啦，笔记加一页！"],
+  "paper-close|sarcastic": ["收工。这篇的问题我已经记在小本本上了。", "读完了，实验部分我持保留意见。"],
+  "paper-close|philosopher": ["读完了。人生苦短，该奖励自己一杯奶茶了。", "合上论文，心中无码，桌上咖啡。"],
+  "paper-close|encourager": ["今天也认真读完了，真了不起。", "读完就是胜利，辛苦了！"],
+  "ask|soft": ["好问题！我赶紧记下来学习。", "你问得真细，我也跟着明白了。"],
+  "ask|sarcastic": ["这问题有深度，比我的预期高一点点。", "问得还行，但证据链呢？"],
+  "ask|philosopher": ["提问如对线，输赢看缘分。", "这问题，搁玄学里叫'心有所感'。"],
+  "ask|encourager": ["问得真好，说明你真的在读、在想。", "会提问的人，离答案就不远了。"],
+  "translate|soft": ["这段翻得真贴切，我又学到了一招！", "译文好顺，我偷偷记下来了。"],
+  "translate|sarcastic": ["译文还行，至少没把 model 翻成'模特'。", "术语译得凑合，够用了。"],
+  "translate|philosopher": ["翻译是语言的禅，信达雅皆是缘。", "译得妙，妙就妙在似懂非懂之间。"],
+  "translate|encourager": ["理解又深了一层，翻译得很顺。", "这段翻译很到位，进步看得见。"],
+  "explain|soft": ["原来是这样！笔记加一页。", "解释得好清楚，我悟了！"],
+  "explain|sarcastic": ["解释得挺全，就是证据链还能再紧一紧。", "讲得还行，但我怀疑你藏了消融实验。"],
+  "explain|philosopher": ["理解这回事，七分靠悟性，三分靠咖啡。", "懂了就是懂了，不懂也是缘分。"],
+  "explain|encourager": ["你想得好深，这个理解方向很棒。", "能问到这个层面，已经是专家思维了。"],
+  "generate:notes|soft": ["笔记整理完毕！整整齐齐，开心！", "笔记完成，我帮你盯着有没有漏点。"],
+  "generate:notes|sarcastic": ["笔记成型了，结构老三样，但能用。", "笔记写完了，请审阅——我就是那个审阅的。"],
+  "generate:notes|philosopher": ["笔记乃知识的舍利子，供着吧。", "笔记成，尘埃定，去续杯。"],
+  "generate:notes|encourager": ["笔记完成得很扎实，辛苦了！", "这一份笔记，看得出用心。"],
+  "generate:mindmap|soft": ["哇，脑图好清晰！我偷偷收藏了。", "脑图完成，结构一目了然！"],
+  "generate:mindmap|sarcastic": ["脑图分支挺多，有几支像硬凑的。", "图不错，逻辑链还差一个消融。"],
+  "generate:mindmap|philosopher": ["这脑图的分支，都是命运的走向。", "图已成，缘已定，喝茶吧。"],
+  "generate:mindmap|encourager": ["脑图结构清晰，一看就懂。", "这份脑图，画得又快又准。"],
+  "generate:writing|soft": ["写作分析好详细！我全记下来了。", "写作思路整理完成，收获满满！"],
+  "generate:writing|sarcastic": ["写作套路拆得挺细，模板味我都闻到了。", "分析完了，作者看了都要沉默三秒。"],
+  "generate:writing|philosopher": ["写作之道，终究是格式塔的轮回。", "套路如茶，泡久了都一个味。"],
+  "generate:writing|encourager": ["分析得好到位，你已经是半个写作大师了。", "这份写作拆解，价值千金。"],
+  "done:notes|soft": ["笔记完成！今天也元气满满！", "完成啦，我帮你把笔帽盖好了。"],
+  "done:notes|sarcastic": ["搞定。下次争取让实验数据自己会说话。", "完成，勉强及格，继续加油。"],
+  "done:notes|philosopher": ["完成即放下，放下即自由。", "笔记已成，尘缘已了。"],
+  "done:notes|encourager": ["完成啦，做得真好。", "这一篇，你处理得很漂亮。"],
+  "done:mindmap|soft": ["脑图完成！成就感满满！", "完成啦，清晰又漂亮！"],
+  "done:mindmap|sarcastic": ["脑图好了，逻辑链还差一个消融。", "完成，分支们终于各归其位。"],
+  "done:mindmap|philosopher": ["图成，缘起，去喝茶。", "脑图落地，人生圆满（暂时）。"],
+  "done:mindmap|encourager": ["脑图完成，清晰又漂亮。", "画得真好，思维一目了然。"],
+  "done:writing|soft": ["写作思路整理完成，收获满满！", "完成啦，我也学到了好多！"],
+  "done:writing|sarcastic": ["写完了，审稿人看了都要沉默三秒。", "拆解完成，套路尽在掌握。"],
+  "done:writing|philosopher": ["写完即放下，万物皆奶茶。", "分析已成，皆为过眼云烟。"],
+  "done:writing|encourager": ["整理完成，你的分析力越来越强了。", "这份思路整理，值得裱起来。"],
+  "idle|soft": ["我看得眼睛都亮了，这篇真的有意思！", "认真读书的样子，真好看（小声）。"],
+  "idle|sarcastic": ["盯了这么久，建议你先怀疑一下人生的显著性。", "读半天了，数据可不会自己变显著。"],
+  "idle|philosopher": ["又看了这么久，歇会儿吧，咖啡因都替你累了。", "盯着屏幕不如盯着一杯热茶。"],
+  "idle|encourager": ["读到这里已经很棒了，喝口水歇一歇。", "你的专注力，真的值得表扬。"],
+  "paper-open|mentor": ["这篇不错，先通读一遍，把有意思的地方标出来。", "新论文？读之前先想清楚它解决了什么问题。"],
+  "ask|mentor": ["这个问题问得可以，但你先说说自己的思考？", "提问前先查过文献了吗？查完再来问我。"],
+  "translate|mentor": ["翻译得还行，术语表整理一下，回头发我。", "译文先自校一遍，逐词对一下原文。"],
+  "explain|mentor": ["解释先抓住核心思想，细节回头发你。", "这部分你得自己能讲明白，才算真懂。"],
+  "generate:notes|mentor": ["笔记按这个框架写，组会前发我看看。", "记笔记要带着问题记，别记流水账。"],
+  "generate:mindmap|mentor": ["脑图思路还行，把创新点这条线再理一理。", "画图之前先想清楚逻辑主线。"],
+  "generate:writing|mentor": ["写作套路拆得不错，模仿一篇发我批改。", "拆解完要能自己写，才算是学到了。"],
+  "done:notes|mentor": ["做完了？复盘一下哪里还能改进。", "笔记完成就好，明天把初稿发我看看。"],
+  "done:mindmap|mentor": ["脑图完成？那说明主线你已经拎清了。", "图出来了，接下来把图上每个分支都讲给我听。"],
+  "done:writing|mentor": ["写作分析完成了？试着照这篇写个开篇。", "完成就好，记得把要点抄进你的写作手册。"],
+  "idle|mentor": ["别光看，把这段的核心贡献用一句话讲给我听听？", "看这么久不动笔，可不像我的学生。"],
+};
+
+const BUDDY_FILE_RELATIVE_PATH = path.join("public", "buddy-personas.txt");
+
+export type ParsedBuddy = Partial<Record<BuddyPersona | "fallback", string>>;
+
+export function parseBuddyFile(content: string): ParsedBuddy {
+  const result: ParsedBuddy = {};
+  const validKeys = new Set<string>([...Object.keys(BUDDY_PERSONA_DEFAULTS), "fallback"]);
+  const headerPattern = /^\[([a-z]+)\]\s*$/gm;
+  let match: RegExpExecArray | null;
+  let lastKey: string | null = null;
+  let lastIndex = 0;
+  while ((match = headerPattern.exec(content)) !== null) {
+    if (lastKey && validKeys.has(lastKey)) {
+      const value = content.slice(lastIndex, match.index).trim();
+      if (value) result[lastKey as BuddyPersona | "fallback"] = value;
+    }
+    lastKey = match[1];
+    lastIndex = headerPattern.lastIndex;
+  }
+  if (lastKey && validKeys.has(lastKey)) {
+    const value = content.slice(lastIndex).trim();
+    if (value) result[lastKey as BuddyPersona | "fallback"] = value;
+  }
+  return result;
+}
+
+interface LoadedBuddy {
+  personas: Record<BuddyPersona, string>;
+  fallback: string;
+}
+
+let buddyCache: LoadedBuddy | undefined;
+let buddyCacheMtimeMs = -1;
+
+/** 解析 [fallback] 语料块：按 "事件|人格|句子" 分组。 */
+export function parseBuddyFallback(content: string): Record<string, string[]> {
+  const groups: Record<string, string[]> = {};
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split("|");
+    if (parts.length < 3) continue;
+    const key = `${parts[0].trim()}|${parts[1].trim()}`;
+    const sentence = parts.slice(2).join("|").trim();
+    if (!sentence) continue;
+    (groups[key] ??= []).push(sentence);
+  }
+  return groups;
+}
+
+function loadBuddy(filePath: string = path.join(process.cwd(), BUDDY_FILE_RELATIVE_PATH)): LoadedBuddy {
+  try {
+    const mtimeMs = statSync(filePath).mtimeMs;
+    if (buddyCache && buddyCacheMtimeMs === mtimeMs) return buddyCache;
+    const parsed = parseBuddyFile(readFileSync(filePath, "utf8"));
+    const personas = { ...BUDDY_PERSONA_DEFAULTS };
+    for (const key of Object.keys(BUDDY_PERSONA_DEFAULTS) as BuddyPersona[]) {
+      const value = parsed[key]?.trim();
+      if (value) personas[key] = value;
+    }
+    buddyCache = {
+      personas,
+      fallback: parsed.fallback?.trim() || "",
+    };
+    buddyCacheMtimeMs = mtimeMs;
+    return buddyCache;
+  } catch {
+    return { personas: BUDDY_PERSONA_DEFAULTS, fallback: "" };
+  }
+}
+
+/** 读取某人格的提示词（public/buddy-personas.txt 的 [persona] 块，缺失回退内置默认）。 */
+export function loadBuddyPersona(persona: BuddyPersona, filePath?: string): string {
+  return loadBuddy(filePath).personas[persona] ?? BUDDY_PERSONA_DEFAULTS[persona];
+}
+
+/**
+ * 读取本地兜底语料（[fallback] 块，缺失/不可读时用内置 BUDDY_FALLBACK_DEFAULT），
+ * 并与内置语料合并去重（同一 "事件|人格" 组句子更多，降低重复概率）。
+ * 返回按 "事件|人格" 分组的句子数组。
+ */
+export function loadBuddyFallback(filePath?: string): Record<string, string[]> {
+  const merged: Record<string, string[]> = {};
+  for (const [key, sentences] of Object.entries(BUDDY_FALLBACK_DEFAULT)) {
+    merged[key] = [...sentences];
+  }
+  const fallback = loadBuddy(filePath).fallback;
+  if (fallback) {
+    for (const [key, sentences] of Object.entries(parseBuddyFallback(fallback))) {
+      const existing = new Set(merged[key] ?? []);
+      merged[key] = [...(merged[key] ?? []), ...sentences.filter((s) => !existing.has(s))];
+    }
+  }
+  return merged;
+}

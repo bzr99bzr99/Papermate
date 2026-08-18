@@ -15,7 +15,10 @@ const providerTargets: Record<Provider, { url: string; model: string; fallbackMo
   },
   glm: {
     url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    model: "glm-4.7-flash",
+    // 双档模型：glm-4-flash（智谱免费模型，官方支持高并发）与 glm-4.7-flash；
+    // 两档互作 404 回退候选。快速/深度由 thinking 参数控制（两档均支持）。
+    model: "glm-4-flash",
+    fallbackModels: ["glm-4.7-flash"],
     label: "GLM",
   },
   kimi: {
@@ -27,6 +30,14 @@ const providerTargets: Record<Provider, { url: string; model: string; fallbackMo
     fallbackModels: ["kimi-k3", "kimi-k2.5"],
     label: "Kimi",
   },
+};
+
+/** 前端下拉的 4 个模型 → 具体模型代号（modelId 与文字标签一一对应）。 */
+const modelById: Record<string, { provider: Provider; model: string; fallbackModels?: string[] }> = {
+  "glm-flash": { provider: "glm", model: "glm-4-flash", fallbackModels: ["glm-4.7-flash"] },
+  "glm-47": { provider: "glm", model: "glm-4.7-flash", fallbackModels: ["glm-4-flash"] },
+  "deepseek-flash": { provider: "deepseek", model: "deepseek-v4-flash" },
+  kimi: { provider: "kimi", model: "kimi-k2.6", fallbackModels: ["kimi-k3", "kimi-k2.5"] },
 };
 
 function sseTextStream(stream: ReadableStream<Uint8Array>) {
@@ -67,6 +78,7 @@ function sseTextStream(stream: ReadableStream<Uint8Array>) {
 export async function POST(request: Request) {
   const body = (await request.json()) as {
     provider?: Provider;
+    modelId?: string;
     apiKey?: string;
     mode?: "fast" | "deep";
     task?: Task;
@@ -74,7 +86,10 @@ export async function POST(request: Request) {
     question?: string;
     messages?: IncomingMessage[];
   };
-  const provider = body.provider === "glm" ? "glm" : body.provider === "kimi" ? "kimi" : "deepseek";
+  // 模型按前端下拉的 modelId 精确选择（4 个模型互不干扰）；
+  // 兼容旧调用方：无 modelId 时按 provider + mode 推导。
+  const picked = body.modelId ? modelById[body.modelId] : undefined;
+  const provider: Provider = picked?.provider ?? (body.provider === "glm" ? "glm" : body.provider === "kimi" ? "kimi" : "deepseek");
   const target = providerTargets[provider];
   // API Key 直接从本机 data/apikey.txt 读取，浏览器不再随请求发送密钥；
   // 兼容旧调用方：请求体里的 apiKey 作为兜底。
@@ -107,7 +122,12 @@ export async function POST(request: Request) {
   const RETRYABLE_UPSTREAM_STATUS = new Set([408, 429, 500, 502, 503, 504]);
   const RETRY_BACKOFF_MS = [3000, 7000, 13000];
   try {
-    const models = [target.model, ...(target.fallbackModels ?? [])];
+    // 快速/深度只切换 thinking（非思考/思考），不再更换模型：
+    // 模型 = modelId 对应的模型（旧调用方按 provider+mode 推导），404 时走回退候选。
+    const baseModel = picked?.model ?? (provider === "glm" && mode === "deep" ? target.fallbackModels?.[0] ?? target.model : target.model);
+    const models = [baseModel, ...(picked?.fallbackModels ?? target.fallbackModels ?? [])].filter(
+      (model, index, list) => model && list.indexOf(model) === index,
+    );
     let upstream: Response | undefined;
     let upstreamStatus = 0;
     for (const model of models) {
@@ -120,12 +140,9 @@ export async function POST(request: Request) {
           body: JSON.stringify({
             model,
             stream: true,
-            ...(provider === "deepseek" || provider === "kimi"
-              ? {
-                  thinking: { type: mode === "deep" ? "enabled" : "disabled" },
-                  ...(provider === "deepseek" && mode === "deep" ? { reasoning_effort: "max" } : {}),
-                }
-              : {}),
+            // 快速/深度 = 非思考/思考：所有模型统一发送 thinking 开关（GLM 双档实测均支持）
+            thinking: { type: mode === "deep" ? "enabled" : "disabled" },
+            ...(provider === "deepseek" && mode === "deep" ? { reasoning_effort: "max" } : {}),
             messages: [
               {
                 role: "system",

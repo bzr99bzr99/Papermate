@@ -33,7 +33,7 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 
 ### Reading Themes
 
-- Ten built-in reading themes: classic, paper white, bean green, parchment, dark, cyberpunk, mono, academic blue, Morandi, and noble.
+- Twenty built-in reading themes: classic, paper white, bean green, parchment, dark, cyberpunk, mono, academic blue, Morandi, and noble, plus new ones such as classified archive and e-ink.
 - Switch themes from the header or the settings panel; the choice is persisted locally.
 
 ### Quotes & Prompt Library
@@ -47,7 +47,8 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 - One-click prompts: translate the selection, or explain it with the full paper as context.
 - Free-form questions can be sent with `Ctrl`/`Cmd` + Enter.
 - Two answer modes: `Flash` for fast translation and routine questions, `MAX 思考` for deeper explanation, summarization, and writing analysis.
-- Three providers: DeepSeek, the free Zhipu GLM 4.7 Flash model, and Kimi (`kimi-k2.6`); each has its own API key and connection test. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
+- Three providers: DeepSeek, Zhipu GLM, and Kimi (`kimi-k2.6`); each has its own API key and connection test. GLM offers two tiers, `glm-4-flash` (free, officially supports high concurrency) and `glm-4.7-flash`, used as fallbacks for each other. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
+- **AI reading companion**: five personas (sarcastic, gentle, philosophical, encouraging, mentor) that react to your questions and answers; hide it anytime (hidden = fully unloaded, no model requests). Persona prompts are editable at `public/buddy-personas.txt`, with local fallback lines when no API key is set.
 - Multi-turn conversations are grouped by page/selection; a question index lets you jump back to earlier turns; individual conversations can be deleted.
 - Translation, context explanation, concept explanation, free Q&A, reading notes, mind map, and writing analysis all use dedicated structured prompts.
 

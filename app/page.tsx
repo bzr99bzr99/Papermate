@@ -61,6 +61,7 @@ import {
   parsePdfFile,
   repairPaperOriginalMetadata,
 } from "@/components/pdf-reader";
+import BuddySystem from "@/components/buddy-system";
 import {
   deletePaper,
   exportBackup,
@@ -125,8 +126,34 @@ type KeyState = "idle" | "testing" | "valid" | "invalid";
 const THEME_KEY = "papermate-theme-v1";
 const LAYOUT_KEY = "papermate-layout-v1";
 const BACKUP_FILE_PATH = "data/papermate-backup.json";
-type ThemeId = "classic" | "paper-white" | "bean-green" | "parchment" | "dark" | "cyberpunk" | "mono" | "academic-blue" | "morandi" | "noble";
-const THEME_IDS: ThemeId[] = ["classic", "paper-white", "bean-green", "parchment", "dark", "cyberpunk", "mono", "academic-blue", "morandi", "noble"];
+
+/* ---------- 模型选择：4 个独立模型；快速/深度按钮只切换“思考”开关，不换模型 ---------- */
+const MODEL_KEY = "papermate-model-v1";
+export type ModelId =
+  | "glm-flash"
+  | "glm-47"
+  | "deepseek-flash"
+  | "kimi";
+const MODEL_OPTIONS: Record<
+  ModelId,
+  { provider: ModelProvider; label: string; badge: string; description: string }
+> = {
+  "glm-flash": { provider: "glm", label: "GLM-4-Flash", badge: "免费 · 并发", description: "智谱免费 · 支持并发" },
+  "glm-47": { provider: "glm", label: "GLM-4.7-Flash", badge: "免费 · 更强", description: "新一代 GLM 免费模型" },
+  "deepseek-flash": { provider: "deepseek", label: "DeepSeek Flash", badge: "快速", description: "DeepSeek 快速回复" },
+  kimi: { provider: "kimi", label: "Kimi K2.6", badge: "长上下文", description: "Moonshot Kimi 模型" },
+};
+function loadModelId(): ModelId {
+  try {
+    const saved = window.localStorage.getItem(MODEL_KEY);
+    if (saved && saved in MODEL_OPTIONS) return saved as ModelId;
+  } catch {
+    /* 忽略 */
+  }
+  return "glm-flash";
+}
+type ThemeId = "classic" | "paper-white" | "bean-green" | "parchment" | "dark" | "cyberpunk" | "mono" | "academic-blue" | "morandi" | "noble" | "classified" | "eink" | "grimoire" | "arcade" | "vinyl" | "hud" | "red-china" | "pixel" | "guofeng" | "inkwash";
+const THEME_IDS: ThemeId[] = ["classic", "paper-white", "bean-green", "parchment", "dark", "cyberpunk", "mono", "academic-blue", "morandi", "noble", "classified", "eink", "grimoire", "arcade", "vinyl", "hud", "red-china", "pixel", "guofeng", "inkwash"];
 type ThemeOption = {
   id: ThemeId;
   name: string;
@@ -144,6 +171,16 @@ const THEMES: ThemeOption[] = [
   { id: "academic-blue", name: "深蓝学术", description: "深蓝底 + 浅色文字 + 金色标题，庄重典雅", swatch: { background: "linear-gradient(135deg, #0e1f38 0%, #d3a845 100%)" } },
   { id: "morandi", name: "莫兰迪灰", description: "低饱和灰调背景 + 柔和文字色，高级耐看", swatch: { background: "linear-gradient(135deg, #d8d8d2 0%, #7d8278 100%)" } },
   { id: "noble", name: "高贵典雅", description: "深墨绿底 + 香槟金标题 + 米白正文，庄重华丽", swatch: { background: "linear-gradient(135deg, #15241d 0%, #c8a24b 100%)" } },
+  { id: "classified", name: "机密绝密档案", description: "牛皮纸档案袋 + 印章红 + 打字机质感，绝密文件柜", swatch: { background: "linear-gradient(135deg, #e8e0cd 0%, #9e1b1b 100%)" } },
+  { id: "eink", name: "电子墨水拟真", description: "纯黑白灰无彩色，模拟墨水屏纸感，专注无干扰", swatch: { background: "linear-gradient(135deg, #f7f7f5 0%, #111111 100%)" } },
+  { id: "grimoire", name: "中世纪魔法典籍", description: "暗羊皮纸 + 金箔文字 + 暗红点缀，魔典书卷氛围", swatch: { background: "linear-gradient(135deg, #241a12 0%, #c9a24b 100%)" } },
+  { id: "arcade", name: "街机像素风", description: "深紫底 + 霓虹青/品红辉光 + 扫描线，街机厅氛围", swatch: { background: "linear-gradient(135deg, #14081f 0%, #3df2ff 52%, #ff3df2 100%)" } },
+  { id: "vinyl", name: "复古黑胶唱片册", description: "暖黑底 + 琥珀金线 + 唱盘圆徽，老唱机氛围", swatch: { background: "linear-gradient(135deg, #1d1613 0%, #d4a03c 100%)" } },
+  { id: "hud", name: "太空舱 HUD 界面", description: "深空蓝黑 + 青色 HUD 发光 + 网格线，飞船仪表舱", swatch: { background: "linear-gradient(135deg, #060d1a 0%, #35e0c0 100%)" } },
+  { id: "red-china", name: "红色中国风", description: "宣纸米底 + 中国红 + 鎏金点缀，东方典藏气质", swatch: { background: "linear-gradient(135deg, #f3ede1 0%, #b52b2b 100%)" } },
+  { id: "pixel", name: "黑白像素风", description: "黑白灰高对比 + 像素颗粒锯齿 + 红黄点缀，复古硬朗", swatch: { background: "linear-gradient(135deg, #e8e8e8 0%, #000000 52%, #ffd400 100%)" } },
+  { id: "guofeng", name: "中国古风", description: "墨色山水 + 青绿点缀 + 朱砂印章，水墨丹青东方意境", swatch: { background: "linear-gradient(135deg, #171d19 0%, #5c8f78 55%, #c24b3f 100%)" } },
+  { id: "inkwash", name: "中国水墨古风", description: "宣纸米底 + 浓淡墨色 + 朱砂印章，水墨留白意境", swatch: { background: "linear-gradient(135deg, #f2efe6 0%, #4a4a44 60%, #b23a2e 100%)" } },
 ];
 
 const blankWorkspace: PaperWorkspace = { annotations: [], conversations: [], artifacts: [] };
@@ -333,6 +370,15 @@ function downloadFile(name: string, content: string, type: string) {
   URL.revokeObjectURL(link.href);
 }
 
+/** 派发陪读小人动作事件（buddy-system 组件监听后按人格回应）。
+ *  payload：场景补充内容——问答/翻译传“原文选段+提问+回答”，成果生成传“论文摘要”。 */
+function buddyEvent(type: string, title?: string, payload?: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent("papermate-buddy-event", { detail: { type, title, payload } }),
+  );
+}
+
 async function copyTextToClipboard(text: string) {
   const textarea = document.createElement("textarea");
   textarea.value = text;
@@ -383,8 +429,23 @@ export default function Home() {
   const [keyState, setKeyState] = useState<KeyState>("idle");
   const [glmKeyState, setGlmKeyState] = useState<KeyState>("idle");
   const [kimiKeyState, setKimiKeyState] = useState<KeyState>("idle");
+  const [modelId, setModelId] = useState<ModelId>(() => loadModelId());
+  // 快速/深度独立状态：只切换当前模型的“思考”开关，不切换模型
   const [mode, setMode] = useState<ModelMode>("fast");
-  const [modelProvider, setModelProvider] = useState<ModelProvider>("glm");
+  const modelProvider: ModelProvider = MODEL_OPTIONS[modelId].provider;
+  /** 选择下拉模型：只改模型，不重置思考开关 */
+  function changeModelId(next: ModelId) {
+    setModelId(next);
+    try {
+      window.localStorage.setItem(MODEL_KEY, next);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  /** 点击快速/深度按钮：仅切换当前模型的思考开关（快速=非思考，深度=思考） */
+  function changeMode(next: ModelMode) {
+    setMode(next);
+  }
   const [question, setQuestion] = useState("");
   const [runningKinds, setRunningKinds] = useState<Set<string>>(new Set());
   const [noticeKinds, setNoticeKinds] = useState<Set<string>>(new Set());
@@ -396,9 +457,42 @@ export default function Home() {
   const [pendingColor, setPendingColor] = useState<HighlightColor>(HIGHLIGHT_COLORS[0]);
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
   const [backfillingId, setBackfillingId] = useState<string>();
+  // 陪读小人显示/隐藏（隐藏后完全卸载，不再说话、不再请求模型）
+  const [buddyVisible, setBuddyVisible] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("papermate-buddy-visible-v1") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  function toggleBuddyVisible() {
+    const next = !buddyVisible;
+    setBuddyVisible(next);
+    try {
+      window.localStorage.setItem("papermate-buddy-visible-v1", next ? "1" : "0");
+    } catch {
+      /* 忽略 */
+    }
+    setNotice(next ? "陪读小人已显示。" : "陪读小人已隐藏，将不再打扰你。");
+  }
   const [notice, setNotice] = useState<string>();
   // 生成/发送失败时的警示弹层（可复制、可关闭，不遮挡阅读）。
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null);
+  // 删除成果/历史版本的自定义确认弹窗（替代浏览器原生 confirm）。
+  const [deleteConfirm, setDeleteConfirm] = useState<
+    | { type: "artifact"; kind: ArtifactKind }
+    | { type: "version"; kind: ArtifactKind; versionId: string }
+    | null
+  >(null);
+  // 确认弹窗：Esc 关闭
+  useEffect(() => {
+    if (!deleteConfirm) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDeleteConfirm(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [deleteConfirm]);
   const [libraryQuery, setLibraryQuery] = useState("");
   const [dragPaperId, setDragPaperId] = useState<string>();
   const [dragOverId, setDragOverId] = useState<string>();
@@ -1043,6 +1137,7 @@ export default function Home() {
         }
       }
       setPaper(opened);
+      buddyEvent("paper-open", opened.title);
       if (!opened.originalReady) {
         setNotice("未读取到文本层，仍会显示原版页面。");
       } else if (repairing && !needsMetaLookup) {
@@ -1263,6 +1358,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider: modelProvider,
+          modelId,
           mode,
           task,
           context,
@@ -1291,10 +1387,6 @@ export default function Home() {
 
   async function sendQuestion(kind: PromptKind, forcedQuestion?: string) {
     if (!paper) return;
-    if (modelProvider === "glm" && runningKindsRef.current.size > 0) {
-      setNotice("GLM 正在处理上一个任务，请稍候。");
-      return;
-    }
     const activeApiKey = apiKeyFor(modelProvider);
     const providerLabel = providerLabelFor(modelProvider);
     if (!activeApiKey.trim()) {
@@ -1426,6 +1518,7 @@ export default function Home() {
       turns: nextTurns,
       updatedAt: now,
     };
+    // 通知陪读小人：按提问类型回应场景
     beginChat(currentConversation.id);
     updateConversation(currentConversation);
     setActiveConversationId(currentConversation.id);
@@ -1464,6 +1557,18 @@ export default function Home() {
         };
         updateConversation(currentConversation);
       });
+      // 回答完成后通知陪读小人：带上本次对话内容（原文选段 + 提问 + 回答），
+      // 让小人结合对话内容聊天（翻译/问答场景）。
+      const assistantReply =
+        currentConversation.turns.find((turn) => turn.id === assistantTurn.id)?.content ?? "";
+      const quoteText = activeAnchors[0]?.quote?.trim()
+        ? `原文选段：${activeAnchors[0].quote.trim().slice(0, 200)}\n`
+        : "";
+      buddyEvent(
+        kind === "translate" ? "translate" : kind === "context" || kind === "concept" ? "explain" : "ask",
+        paper.title,
+        `${quoteText}用户提问：${finalQuestion}\n模型回答：${assistantReply.slice(0, 500)}`,
+      );
     } catch (error) {
       // 发送失败：不把失败内容写入对话——复用会话时恢复发送前的状态（含被覆盖的旧问答），
       // 新建的空会话整体移除；问题写回输入框，并弹出可复制的警示信息。
@@ -1492,10 +1597,6 @@ export default function Home() {
 
   async function generateArtifact(kind: ArtifactKind) {
     if (!paper) return;
-    if (modelProvider === "glm" && runningKindsRef.current.size > 0) {
-      setNotice("GLM 正在处理上一个任务，请稍候。");
-      return;
-    }
     if (runningKinds.has(kind)) return;
     const activeApiKey = apiKeyFor(modelProvider);
     const providerLabel = providerLabelFor(modelProvider);
@@ -1507,6 +1608,11 @@ export default function Home() {
     // 生成前先把最新 API Key 写回文件（服务端从 data/apikey.txt 读取）。
     await persistApiKeys();
     startKind(kind, paper.id);
+    // 陪读小人：成果生成只给论文题目 + 摘要，让它据此聊天。
+    const buddyAbstract = (paperDigest?.trim() ? paperDigest.trim() : paper.pages[0]?.text?.slice(0, 300) ?? "")
+      .slice(0, 500);
+    const buddyPayload = buddyAbstract ? `论文摘要：\n${buddyAbstract}` : undefined;
+    buddyEvent(`generate:${kind}`, paper.title, buddyPayload);
     const details = artifactDetails[kind];
     const base = workspaceRef.current;
     // 保留已有成果：重新生成时沿用原记录（同 id），流式更新内容；
@@ -1546,6 +1652,7 @@ export default function Home() {
         const current = workspaceRef.current;
         commitWorkspace({ ...current, artifacts: [withVersions, ...current.artifacts.filter((item) => item.kind !== kind)] });
       }
+      buddyEvent(`done:${kind}`, paper.title, buddyPayload);
     } catch (error) {
       // 生成失败：恢复原有内容（或移除本次新建的空草稿），弹警示信息说明原因。
       const reason = error instanceof Error ? error.message : "未知错误";
@@ -1575,7 +1682,11 @@ export default function Home() {
   function deleteArtifact(kind: ArtifactKind) {
     const base = workspaceRef.current;
     if (!base.artifacts.some((item) => item.kind === kind)) return;
-    if (!window.confirm(`确定删除「${artifactDetails[kind].title}」吗？删除后无法恢复。`)) return;
+    setDeleteConfirm({ type: "artifact", kind });
+  }
+
+  function confirmDeleteArtifact(kind: ArtifactKind) {
+    const base = workspaceRef.current;
     commitWorkspace({ ...base, artifacts: base.artifacts.filter((item) => item.kind !== kind) });
     setNotice(`已删除「${artifactDetails[kind].title}」。`);
   }
@@ -1601,6 +1712,29 @@ export default function Home() {
     };
     commitWorkspace({ ...base, artifacts: base.artifacts.map((item) => (item.id === next.id ? next : item)) });
     setNotice(`已保存「${artifactDetails[kind].title}」当前版本。`);
+  }
+
+  /** 删除某个历史版本（当前内容不受影响）。 */
+  function deleteArtifactVersion(kind: ArtifactKind, versionId: string) {
+    const base = workspaceRef.current;
+    const artifact = base.artifacts.find((item) => item.kind === kind);
+    if (!artifact || !artifact.versions?.length) return;
+    setDeleteConfirm({ type: "version", kind, versionId });
+  }
+
+  function confirmDeleteArtifactVersion(kind: ArtifactKind, versionId: string) {
+    const base = workspaceRef.current;
+    const artifact = base.artifacts.find((item) => item.kind === kind);
+    if (!artifact || !artifact.versions?.length) return;
+    const versions = artifact.versions.filter((version) => version.id !== versionId);
+    if (versions.length === artifact.versions.length) return;
+    const next: GeneratedArtifact = {
+      ...artifact,
+      versions,
+      updatedAt: new Date().toISOString(),
+    };
+    commitWorkspace({ ...base, artifacts: base.artifacts.map((item) => (item.id === next.id ? next : item)) });
+    setNotice("已删除该历史版本。");
   }
 
   function editArtifact(kind: ArtifactKind, content: string) {
@@ -1913,14 +2047,20 @@ export default function Home() {
   }
 
   const artifact = rightView === "chat" ? undefined : workspace.artifacts.find((item) => item.kind === rightView);
-  const glmLocked = modelProvider === "glm" && runningKinds.size > 0;
   return (
     <main className="workspace-shell">
       <header className="workspace-header">
-        <button className="brand-small" onClick={() => setPaper(undefined)} aria-label="返回论文库"><PanelLeftClose size={17} /><span>返 回 论 文 库</span></button>
+        <button className="brand-small" onClick={() => { setPaper(undefined); buddyEvent("paper-close"); }} aria-label="返回论文库"><PanelLeftClose size={17} /><span>返 回 论 文 库</span></button>
         <div className="paper-title"><FileText size={16} /><strong>{paper.title}</strong><span>{paper.pageCount} 页 · 本地保存</span></div>
         <div className="header-actions">
           {notice && <span className="compact-notice">{notice}</span>}
+          <button
+            className={`buddy-toggle ${buddyVisible ? "active" : ""}`}
+            onClick={toggleBuddyVisible}
+            title={buddyVisible ? "隐藏陪读小人" : "显示陪读小人"}
+            aria-label="显示或隐藏陪读小人"
+            aria-pressed={buddyVisible}
+          ><Bot size={16} /></button>
           <ThemeSwitcher theme={theme} onChange={setTheme} />
           <button className="settings-trigger" onClick={() => setSettingsOpen(true)}><Settings2 size={16} /> 设置</button>
         </div>
@@ -1947,12 +2087,7 @@ export default function Home() {
             })}
           </nav>
           <div className="sidebar-model">
-            <ModelSwitch
-              mode={mode}
-              setMode={setMode}
-              provider={modelProvider}
-              setProvider={setModelProvider}
-            />
+            <ModelSwitch modelId={modelId} onChange={changeModelId} mode={mode} onModeChange={changeMode} />
           </div>
           <div className="sidebar-divider" />
           <details className="chapter-index" open>
@@ -2020,11 +2155,8 @@ export default function Home() {
               activeConversationId={activeConversationId}
               question={question}
               setQuestion={setQuestion}
-              // 并发对话：仅当当前会话正在生成时禁用发送；其他会话可同时提问。
-              generating={
-                Boolean(selectedConversation?.id && runningChatIds.has(selectedConversation.id)) ||
-                glmLocked
-              }
+              // 并发对话：仅当当前会话正在生成时禁用发送；其他会话可同时提问（GLM 免费档亦支持并发）。
+              generating={Boolean(selectedConversation?.id && runningChatIds.has(selectedConversation.id))}
               pendingColor={pendingColor}
               onPendingColorChange={setPendingColor}
               onChangeColor={changeConversationColor}
@@ -2034,17 +2166,20 @@ export default function Home() {
               onSelectConversation={selectConversation}
               onDeleteTurn={deleteConversationTurn}
               provider={modelProvider}
+              mode={mode}
+              modelLabel={MODEL_OPTIONS[modelId].label}
             />
           ) : (
             <ArtifactPanel
               kind={rightView}
               paper={paper}
               artifact={artifact}
-              generating={runningKinds.has(rightView) || glmLocked}
+              generating={runningKinds.has(rightView)}
               onGenerate={() => void generateArtifact(rightView)}
               onEdit={(content) => editArtifact(rightView, content)}
               onDelete={() => deleteArtifact(rightView)}
               onSaveVersion={() => saveArtifactVersion(rightView)}
+              onDeleteVersion={(versionId) => deleteArtifactVersion(rightView, versionId)}
             />
           )}
         </aside>
@@ -2055,6 +2190,7 @@ export default function Home() {
           <div className="resize-handle right" onPointerDown={(event) => startResize("right", event)} role="separator" aria-orientation="vertical" aria-label="调整右侧宽度" />
         )}
       </div>
+      {buddyVisible && <BuddySystem noteCount={workspace.conversations.length} />}
       <SettingsSheet
         open={settingsOpen}
         onClose={closeSettings}
@@ -2101,6 +2237,38 @@ export default function Home() {
               <Copy size={14} /> 复制错误信息
             </button>
             <button type="button" className="primary" onClick={() => setErrorDialog(null)}>关闭</button>
+          </div>
+        </div>
+      ) : null}
+      {deleteConfirm ? (
+        <div className="confirm-overlay" role="alertdialog" aria-modal="true" aria-label="确认删除" onClick={() => setDeleteConfirm(null)}>
+          <div className="confirm-dialog" onClick={(event) => event.stopPropagation()}>
+            <span className="confirm-dialog-icon"><Trash2 size={18} /></span>
+            <div className="confirm-dialog-text">
+              <strong>
+                {deleteConfirm.type === "artifact"
+                  ? `删除「${artifactDetails[deleteConfirm.kind].title}」？`
+                  : "删除这个历史版本？"}
+              </strong>
+              <p>删除后无法恢复。</p>
+            </div>
+            <div className="confirm-dialog-actions">
+              <button type="button" onClick={() => setDeleteConfirm(null)}>取消</button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => {
+                  if (deleteConfirm.type === "artifact") {
+                    confirmDeleteArtifact(deleteConfirm.kind);
+                  } else {
+                    confirmDeleteArtifactVersion(deleteConfirm.kind, deleteConfirm.versionId);
+                  }
+                  setDeleteConfirm(null);
+                }}
+              >
+                删除
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -2211,28 +2379,79 @@ function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: 
   );
 }
 
-function ModelSwitch({ mode, setMode, provider, setProvider }: {
+function ModelSwitch({ modelId, onChange, mode, onModeChange }: {
+  modelId: ModelId;
+  onChange: (next: ModelId) => void;
   mode: ModelMode;
-  setMode: (mode: ModelMode) => void;
-  provider: ModelProvider;
-  setProvider: (provider: ModelProvider) => void;
+  onModeChange: (mode: ModelMode) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+  const active = MODEL_OPTIONS[modelId];
+  const providerIcon =
+    active.provider === "glm" ? <Sparkles size={13} /> : active.provider === "kimi" ? <Moon size={13} /> : <Zap size={13} />;
   return (
     <div className="model-switch-stack">
       <div className="model-switch" role="group" aria-label="回答模式">
-        <button className={mode === "fast" ? "active" : ""} onClick={() => setMode("fast")}><span>快速</span><small>Flash</small></button>
-        <button className={mode === "deep" ? "active" : ""} onClick={() => setMode("deep")}><span>深度</span><small>MAX 思考</small></button>
+        <button className={mode === "fast" ? "active" : ""} onClick={() => onModeChange("fast")}><span>快速</span><small>非思考</small></button>
+        <button className={mode === "deep" ? "active" : ""} onClick={() => onModeChange("deep")}><span>深度</span><small>思考</small></button>
       </div>
-      <div className="model-switch provider-switch" role="group" aria-label="模型服务商">
-        <button className={provider === "glm" ? "active" : ""} onClick={() => setProvider("glm")}><Sparkles size={12} /><span>GLM 免费</span></button>
-        <button className={provider === "kimi" ? "active" : ""} onClick={() => setProvider("kimi")}><Moon size={12} /><span>Kimi K2.6</span></button>
-        <button className={provider === "deepseek" ? "active" : ""} onClick={() => setProvider("deepseek")}><Zap size={12} /><span>DeepSeek</span></button>
+      <div className="model-select" ref={rootRef}>
+        <button
+          className="model-select-trigger"
+          onClick={() => setOpen((value) => !value)}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          title="切换模型"
+        >
+          {providerIcon}
+          <span className="model-select-label">{active.label}</span>
+          <span className="model-select-badge">{active.badge}</span>
+          <ChevronDown size={13} className={`model-select-chevron ${open ? "is-open" : ""}`} />
+        </button>
+        {open && (
+          <div className="model-select-menu" role="listbox" aria-label="选择模型">
+            {(Object.keys(MODEL_OPTIONS) as ModelId[]).map((id) => {
+              const option = MODEL_OPTIONS[id];
+              const icon =
+                option.provider === "glm" ? <Sparkles size={14} /> : option.provider === "kimi" ? <Moon size={14} /> : <Zap size={14} />;
+              return (
+                <button
+                  key={id}
+                  role="option"
+                  aria-selected={id === modelId}
+                  className={`model-select-item ${id === modelId ? "active" : ""}`}
+                  onClick={() => {
+                    onChange(id);
+                    setOpen(false);
+                  }}
+                >
+                  {icon}
+                  <span className="model-select-item-main">
+                    <b>{option.label}</b>
+                    <small>{option.description}</small>
+                  </span>
+                  <span className="model-select-item-badge">{option.badge}</span>
+                  {id === modelId && <Check size={13} className="model-select-check" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, onDeleteTurn, provider }: {
+function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, onDeleteTurn, provider, mode, modelLabel }: {
   anchors?: TextAnchor[];
   selectionGroup?: SelectionGroup;
   conversation?: Conversation;
@@ -2250,6 +2469,8 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   onSelectConversation: (conversation: Conversation) => void;
   onDeleteTurn: (conversation: Conversation, turnId: string) => void;
   provider: ModelProvider;
+  mode: ModelMode;
+  modelLabel: string;
 }) {
   const historyRef = useRef<HTMLDivElement>(null);
   const [focusRequest, setFocusRequest] = useState<{ turnId: string; nonce: number }>();
@@ -2306,7 +2527,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   const colorMode = conversation ? "会话" : "下一次提问";
 
   return <div className="chat-panel">
-    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{provider === "glm" ? "GLM 4.7 Flash" : provider === "kimi" ? "Kimi K2.6" : "DeepSeek Flash"}</span></div>
+    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{modelLabel}{mode === "deep" ? " · 思考" : ""}</span></div>
     <details className="question-index">
       <summary><MessageCircleMore size={14} /> 提问索引 <b>{indexItems.length}</b></summary>
       {indexItems.length ? (
@@ -2447,7 +2668,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   </div>;
 }
 
-function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, onDelete, onSaveVersion }: {
+function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, onDelete, onSaveVersion, onDeleteVersion }: {
   kind: ArtifactKind;
   paper: Paper;
   artifact?: GeneratedArtifact;
@@ -2456,6 +2677,7 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, 
   onEdit: (content: string) => void;
   onDelete: () => void;
   onSaveVersion: () => void;
+  onDeleteVersion: (versionId: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [viewingVersionId, setViewingVersionId] = useState<string | undefined>(undefined);
@@ -2521,6 +2743,19 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, 
                 onClick={() => setViewingVersionId(viewingVersionId === version.id ? undefined : version.id)}
               >
                 {readableDateTime(version.createdAt)}
+                <span
+                  className="artifact-version-delete"
+                  role="button"
+                  aria-label="删除此历史版本"
+                  title="删除此版本"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (viewingVersionId === version.id) setViewingVersionId(undefined);
+                    onDeleteVersion(version.id);
+                  }}
+                >
+                  <Trash2 size={11} />
+                </span>
               </button>
             ))}
           </div>
@@ -2632,7 +2867,7 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                     {state === "invalid" && <p className="key-result bad">连接失败，请检查 Key、额度或网络。</p>}
                   </section>
                   <section className="settings-api-card">
-                    <div className="settings-api-title"><Sparkles size={17} /><div><b>智谱 GLM 4.7 Flash</b><span>免费模型，与 DeepSeek 独立切换</span></div></div>
+                    <div className="settings-api-title"><Sparkles size={17} /><div><b>智谱 GLM Flash</b><span>免费模型：快速 GLM-4-Flash · 深度 4.7-Flash，支持并发</span></div></div>
                     <label>智谱 API Key<input type="password" value={glmApiKey} onChange={(event) => setGlmApiKey(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (glmApiKey.trim()) onClose(); } }} placeholder="智谱 API Key" autoComplete="off" /></label>
                     <button className="test-key" disabled={!glmApiKey.trim() || glmState === "testing"} onClick={onTestGlm}>{glmState === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{glmState === "testing" ? "验证中" : "验证连接"}</button>
                     {glmState === "valid" && <p className="key-result good">连接成功，可以开始提问。</p>}
@@ -2744,7 +2979,7 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                   </button>
                 </div>
               </section>
-              <div className="mode-info"><div><b>快速 · Flash</b><span>翻译、基础问答</span></div><div><b>深度 · MAX 思考</b><span>解释、总结、写作分析</span></div><div><b>DeepSeek</b><span>独立 API Key</span></div><div><b>GLM 4.7 Flash</b><span>智谱免费模型</span></div></div>
+              <div className="mode-info"><div><b>快速 · Flash</b><span>翻译、基础问答</span></div><div><b>深度 · MAX 思考</b><span>解释、总结、写作分析</span></div><div><b>DeepSeek</b><span>独立 API Key</span></div><div><b>GLM Flash</b><span>免费 · 4-Flash / 4.7-Flash · 并发</span></div></div>
             </aside>
           </div>
         </div>

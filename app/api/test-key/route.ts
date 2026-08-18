@@ -21,7 +21,7 @@ export async function POST(request: Request) {
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             cache: "no-store",
             body: JSON.stringify({
-              model: "glm-4.7-flash",
+              model: "glm-4-flash",
               messages: [{ role: "user", content: "ping" }],
               max_tokens: 1,
               stream: false,
