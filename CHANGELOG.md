@@ -2,6 +2,17 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [3.0.1] - 2026-08-16
+
+### Added
+
+- `public/prompts0818.txt` prompt snapshot included in the repo.
+
+### Changed
+
+- Reading-companion personas and UI styles refined.
+- README interface overview updated with the Q&A and reading-companion screenshots; sample outputs and the screenshot folder synced to the current project.
+
 ## [3.0.0] - 2026-08-16
 
 ### Added
