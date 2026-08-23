@@ -64,6 +64,7 @@ import {
 import BuddySystem from "@/components/buddy-system";
 import {
   deletePaper,
+  deleteCustomModel,
   exportBackup,
   fetchDiskBackup,
   findPaperBySourceHash,
@@ -72,10 +73,12 @@ import {
   getSettings,
   getWorkspace,
   importBackup,
+  listModels,
   listPapers,
   lookupPaperMetadata,
   reorderPapers,
   saveApiKeys,
+  saveCustomModel,
   saveSettings,
   savePaper,
   saveWorkspace,
@@ -103,6 +106,16 @@ import {
 import { markdownToMindMap, mindMapToSvg } from "@/lib/mindmap";
 import { loadReaderQuotes, READER_QUOTES } from "@/lib/quotes";
 import { blobSha256 } from "@/lib/source-hash";
+import {
+  BUILTIN_MODEL_IDS,
+  BUILTIN_MODELS,
+  CUSTOM_MODEL_BADGE,
+  mergeModelOptions,
+  validateCustomModel,
+  type BuiltinModelId,
+  type ClientModelOption,
+  type CustomModelConfig,
+} from "@/lib/models";
 import type {
   ArtifactKind,
   ArtifactVersion,
@@ -127,30 +140,18 @@ const THEME_KEY = "papermate-theme-v1";
 const LAYOUT_KEY = "papermate-layout-v1";
 const BACKUP_FILE_PATH = "data/papermate-backup.json";
 
-/* ---------- 模型选择：4 个独立模型；快速/深度按钮只切换“思考”开关，不换模型 ---------- */
+/* ---------- 模型选择：内置 4 个模型 + 用户在设置中添加的自定义模型；快速/深度按钮只切换“思考”开关，不换模型 ---------- */
 const MODEL_KEY = "papermate-model-v1";
-export type ModelId =
-  | "glm-flash"
-  | "glm-47"
-  | "deepseek-flash"
-  | "kimi";
-const MODEL_OPTIONS: Record<
-  ModelId,
-  { provider: ModelProvider; label: string; badge: string; description: string }
-> = {
-  "glm-flash": { provider: "glm", label: "GLM-4-Flash", badge: "免费 · 并发", description: "智谱免费 · 支持并发" },
-  "glm-47": { provider: "glm", label: "GLM-4.7-Flash", badge: "免费 · 更强", description: "新一代 GLM 免费模型" },
-  "deepseek-flash": { provider: "deepseek", label: "DeepSeek Flash", badge: "快速", description: "DeepSeek 快速回复" },
-  kimi: { provider: "kimi", label: "Kimi K2.6", badge: "长上下文", description: "Moonshot Kimi 模型" },
-};
-function loadModelId(): ModelId {
+const DEFAULT_MODEL_ID = "glm-flash" as BuiltinModelId;
+function loadModelId(): string {
   try {
     const saved = window.localStorage.getItem(MODEL_KEY);
-    if (saved && saved in MODEL_OPTIONS) return saved as ModelId;
+    // 内置 id 直接可用；自定义模型 id 在列表加载完成后再校验（此处只处理内置）。
+    if (saved && (BUILTIN_MODEL_IDS as readonly string[]).includes(saved)) return saved;
   } catch {
     /* 忽略 */
   }
-  return "glm-flash";
+  return DEFAULT_MODEL_ID;
 }
 type ThemeId = "classic" | "paper-white" | "bean-green" | "parchment" | "dark" | "cyberpunk" | "mono" | "academic-blue" | "morandi" | "noble" | "classified" | "eink" | "grimoire" | "arcade" | "vinyl" | "hud" | "red-china" | "pixel" | "guofeng" | "inkwash";
 const THEME_IDS: ThemeId[] = ["classic", "paper-white", "bean-green", "parchment", "dark", "cyberpunk", "mono", "academic-blue", "morandi", "noble", "classified", "eink", "grimoire", "arcade", "vinyl", "hud", "red-china", "pixel", "guofeng", "inkwash"];
@@ -429,17 +430,103 @@ export default function Home() {
   const [keyState, setKeyState] = useState<KeyState>("idle");
   const [glmKeyState, setGlmKeyState] = useState<KeyState>("idle");
   const [kimiKeyState, setKimiKeyState] = useState<KeyState>("idle");
-  const [modelId, setModelId] = useState<ModelId>(() => loadModelId());
+  const [modelId, setModelId] = useState<string>(() => loadModelId());
+  // 自定义模型（设置中添加）：下拉与问答/生成共用。
+  const [allModels, setAllModels] = useState<ClientModelOption[]>(() =>
+    mergeModelOptions(BUILTIN_MODELS, []),
+  );
+  const [customModels, setCustomModels] = useState<CustomModelConfig[]>([]);
   // 快速/深度独立状态：只切换当前模型的“思考”开关，不切换模型
   const [mode, setMode] = useState<ModelMode>("fast");
-  const modelProvider: ModelProvider = MODEL_OPTIONS[modelId].provider;
+  const modelProvider: ModelProvider =
+    allModels.find((item) => item.id === modelId)?.provider ?? "deepseek";
   /** 选择下拉模型：只改模型，不重置思考开关 */
-  function changeModelId(next: ModelId) {
+  function changeModelId(next: string) {
     setModelId(next);
     try {
       window.localStorage.setItem(MODEL_KEY, next);
     } catch {
       /* 忽略 */
+    }
+  }
+  /** 刷新模型列表（内置 + 自定义），供下拉与设置页使用 */
+  const modelsReadyRef = useRef(false);
+  const refreshModels = useCallback(async () => {
+    try {
+      const registry = await listModels();
+      setAllModels(registry.models);
+      setCustomModels(registry.custom);
+      modelsReadyRef.current = true;
+    } catch {
+      // 读取失败时保留现有列表（内置模型仍可用）。
+    }
+  }, []);
+  useEffect(() => {
+    void refreshModels();
+  }, [refreshModels]);
+  useEffect(() => {
+    if (settingsOpen) void refreshModels();
+  }, [settingsOpen, refreshModels]);
+  // 模型列表加载完成后，若当前选中的模型不存在（已被删除等）则回退默认模型。
+  useEffect(() => {
+    if (!modelsReadyRef.current) return;
+    if (!allModels.some((item) => item.id === modelId)) {
+      changeModelId(DEFAULT_MODEL_ID);
+    }
+  }, [allModels, modelId]);
+
+  /** 保存（新增/更新）自定义模型 */
+  async function handleSaveCustomModel(model: CustomModelConfig) {
+    try {
+      const saved = await saveCustomModel(model);
+      setNotice(saved ? `模型「${saved.name}」已保存。` : undefined);
+      await refreshModels();
+      return { ok: true as const };
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "自定义模型保存失败。");
+      return { ok: false as const };
+    }
+  }
+
+  /** 删除自定义模型 */
+  async function handleDeleteCustomModel(id: string) {
+    try {
+      await deleteCustomModel(id);
+      if (modelId === id) changeModelId(DEFAULT_MODEL_ID);
+      setNotice("已删除该自定义模型。");
+      await refreshModels();
+      return { ok: true as const };
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "自定义模型删除失败。");
+      return { ok: false as const };
+    }
+  }
+
+  /** 测试自定义模型连接（已保存模型按 modelId，草稿按表单 url/modelName） */
+  async function handleTestCustomModel(input: {
+    modelId?: string;
+    baseUrl: string;
+    model: string;
+    apiKey?: string;
+  }) {
+    try {
+      const response = await fetch("/api/test-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelId: input.modelId,
+          url: input.baseUrl,
+          modelName: input.model,
+          apiKey: input.apiKey,
+        }),
+      });
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? "连接失败。");
+      }
+      return { ok: true as const };
+    } catch (error) {
+      return { ok: false as const, message: error instanceof Error ? error.message : "连接失败。" };
     }
   }
   /** 点击快速/深度按钮：仅切换当前模型的思考开关（快速=非思考，深度=思考） */
@@ -1343,6 +1430,18 @@ export default function Home() {
     provider === "glm" ? glmApiKey : provider === "kimi" ? kimiApiKey : apiKey;
   const providerLabelFor = (provider: ModelProvider) =>
     provider === "glm" ? "智谱 GLM" : provider === "kimi" ? "Moonshot Kimi" : "DeepSeek";
+  // 当前选中模型的 Key 与显示名（自定义模型的 Key 来自其配置）。
+  const currentModelApiKey = (): string => {
+    if (modelProvider === "custom") {
+      return customModels.find((model) => model.id === modelId)?.apiKey?.trim() ?? "";
+    }
+    return apiKeyFor(modelProvider);
+  };
+  const currentModelLabel = (): string =>
+    modelProvider === "custom"
+      ? allModels.find((item) => item.id === modelId)?.label ?? "该自定义模型"
+      : providerLabelFor(modelProvider);
+  const activeModelLabel = allModels.find((item) => item.id === modelId)?.label ?? "模型";
 
   async function streamResponse(
     task: PromptKind | ArtifactKind,
@@ -1387,11 +1486,15 @@ export default function Home() {
 
   async function sendQuestion(kind: PromptKind, forcedQuestion?: string) {
     if (!paper) return;
-    const activeApiKey = apiKeyFor(modelProvider);
-    const providerLabel = providerLabelFor(modelProvider);
+    const activeApiKey = currentModelApiKey();
+    const providerLabel = currentModelLabel();
     if (!activeApiKey.trim()) {
       setSettingsOpen(true);
-      setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
+      setNotice(
+        modelProvider === "custom"
+          ? `请先在设置中为「${providerLabel}」配置 API Key。`
+          : `请先在设置中填写并验证你的 ${providerLabel} API Key。`,
+      );
       return;
     }
     const requestedQuestion = forcedQuestion?.trim() || question.trim();
@@ -1598,11 +1701,15 @@ export default function Home() {
   async function generateArtifact(kind: ArtifactKind) {
     if (!paper) return;
     if (runningKinds.has(kind)) return;
-    const activeApiKey = apiKeyFor(modelProvider);
-    const providerLabel = providerLabelFor(modelProvider);
+    const activeApiKey = currentModelApiKey();
+    const providerLabel = currentModelLabel();
     if (!activeApiKey.trim()) {
       setSettingsOpen(true);
-      setNotice(`请先在设置中填写并验证你的 ${providerLabel} API Key。`);
+      setNotice(
+        modelProvider === "custom"
+          ? `请先在设置中为「${providerLabel}」配置 API Key。`
+          : `请先在设置中填写并验证你的 ${providerLabel} API Key。`,
+      );
       return;
     }
     // 生成前先把最新 API Key 写回文件（服务端从 data/apikey.txt 读取）。
@@ -2041,6 +2148,10 @@ export default function Home() {
           onExportBackup={() => void exportBackupFile()}
           onImportBackup={(file) => void importBackupFile(file)}
           onCopyPath={(ok) => setNotice(ok ? "备份文件路径已复制到剪贴板。" : "无法复制路径，请手动复制上方文件位置。")}
+          customModels={customModels}
+          onSaveCustomModel={handleSaveCustomModel}
+          onDeleteCustomModel={handleDeleteCustomModel}
+          onTestCustomModel={handleTestCustomModel}
         />
       </main>
     );
@@ -2087,7 +2198,7 @@ export default function Home() {
             })}
           </nav>
           <div className="sidebar-model">
-            <ModelSwitch modelId={modelId} onChange={changeModelId} mode={mode} onModeChange={changeMode} />
+            <ModelSwitch models={allModels} modelId={modelId} onChange={changeModelId} mode={mode} onModeChange={changeMode} />
           </div>
           <div className="sidebar-divider" />
           <details className="chapter-index" open>
@@ -2167,7 +2278,7 @@ export default function Home() {
               onDeleteTurn={deleteConversationTurn}
               provider={modelProvider}
               mode={mode}
-              modelLabel={MODEL_OPTIONS[modelId].label}
+              modelLabel={activeModelLabel}
             />
           ) : (
             <ArtifactPanel
@@ -2216,6 +2327,10 @@ export default function Home() {
         onExportBackup={() => void exportBackupFile()}
         onImportBackup={(file) => void importBackupFile(file)}
         onCopyPath={(ok) => setNotice(ok ? "备份文件路径已复制到剪贴板。" : "无法复制路径，请手动复制上方文件位置。")}
+        customModels={customModels}
+        onSaveCustomModel={handleSaveCustomModel}
+        onDeleteCustomModel={handleDeleteCustomModel}
+        onTestCustomModel={handleTestCustomModel}
       />
       {errorDialog ? (
         <div className="error-dialog" role="alertdialog" aria-label={errorDialog.title}>
@@ -2379,14 +2494,46 @@ function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: 
   );
 }
 
-function ModelSwitch({ modelId, onChange, mode, onModeChange }: {
-  modelId: ModelId;
-  onChange: (next: ModelId) => void;
+function modelIcon(provider: ModelProvider, size: number) {
+  return provider === "glm" ? <Sparkles size={size} /> : provider === "kimi" ? <Moon size={size} /> : provider === "custom" ? <Bot size={size} /> : <Zap size={size} />;
+}
+
+function ModelSwitch({ models, modelId, onChange, mode, onModeChange }: {
+  models: ClientModelOption[];
+  modelId: string;
+  onChange: (next: string) => void;
   mode: ModelMode;
   onModeChange: (mode: ModelMode) => void;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // 当前显示的模型（驱动翻转动画：先翻出旧内容，再翻入新内容）
+  const [shown, setShown] = useState<ClientModelOption | undefined>(undefined);
+  const shownRef = useRef<ClientModelOption | undefined>(undefined);
+  shownRef.current = shown;
+  const [flip, setFlip] = useState<"none" | "out" | "in">("none");
+  const flipTimer = useRef<number | undefined>(undefined);
+  const wheelAccum = useRef(0);
+  const lastWheelAt = useRef(0);
+  const pickRef = useRef<(next: ClientModelOption) => void>(() => {});
+  pickRef.current = (next) => {
+    if (!next) return;
+    // 点击当前已选中的模型：不重复切换，但仍收起菜单。
+    if (next.id !== shownRef.current?.id) {
+      window.clearTimeout(flipTimer.current);
+      setFlip("out");
+      flipTimer.current = window.setTimeout(() => {
+        setShown(next);
+        setFlip("in");
+        flipTimer.current = window.setTimeout(() => setFlip("none"), 180);
+      }, 170);
+      onChange(next.id);
+    }
+    setOpen(false);
+  };
+  useEffect(() => () => window.clearTimeout(flipTimer.current), []);
+
   useEffect(() => {
     if (!open) return;
     const onDocClick = (event: MouseEvent) => {
@@ -2395,9 +2542,41 @@ function ModelSwitch({ modelId, onChange, mode, onModeChange }: {
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [open]);
-  const active = MODEL_OPTIONS[modelId];
-  const providerIcon =
-    active.provider === "glm" ? <Sparkles size={13} /> : active.provider === "kimi" ? <Moon size={13} /> : <Zap size={13} />;
+
+  const active = models.find((item) => item.id === modelId) ?? models[0];
+  // 外部变更（如删除模型回退、列表刷新）时同步显示；翻转期间不打断动画。
+  useEffect(() => {
+    if (flip !== "none") return;
+    if (active && (!shown || active.id !== shown.id || active.label !== shown.label || active.badge !== shown.badge)) {
+      setShown(active);
+    }
+  }, [active, flip, shown]);
+
+  // 滚轮上下切换模型（原生非被动监听，阻止页面滚动；累计阈值 + 冷却防误触）
+  useEffect(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (open) return;
+      const now = Date.now();
+      if (now - lastWheelAt.current < 200) return;
+      wheelAccum.current += event.deltaY;
+      if (Math.abs(wheelAccum.current) < 45) return;
+      wheelAccum.current = 0;
+      lastWheelAt.current = now;
+      if (!models.length) return;
+      const index = models.findIndex((item) => item.id === modelId);
+      const base = index === -1 ? 0 : index;
+      // 向下滚动 → 下一个模型；向上滚动 → 上一个模型（循环）。
+      const dir = event.deltaY > 0 ? 1 : -1;
+      const next = models[(base + dir + models.length) % models.length];
+      if (next) pickRef.current(next);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [models, modelId, open]);
+
   return (
     <div className="model-switch-stack">
       <div className="model-switch" role="group" aria-label="回答模式">
@@ -2406,44 +2585,39 @@ function ModelSwitch({ modelId, onChange, mode, onModeChange }: {
       </div>
       <div className="model-select" ref={rootRef}>
         <button
+          ref={triggerRef}
           className="model-select-trigger"
           onClick={() => setOpen((value) => !value)}
           aria-haspopup="listbox"
           aria-expanded={open}
-          title="切换模型"
+          title="滚轮上下切换 · 点击选择模型"
         >
-          {providerIcon}
-          <span className="model-select-label">{active.label}</span>
-          <span className="model-select-badge">{active.badge}</span>
+          <span className={`model-select-flip ${flip === "out" ? "is-out" : flip === "in" ? "is-in" : ""}`}>
+            {shown ? modelIcon(shown.provider, 13) : null}
+            <span className="model-select-label">{shown?.label ?? "模型"}</span>
+            <span className="model-select-badge">{shown?.badge ?? ""}</span>
+          </span>
           <ChevronDown size={13} className={`model-select-chevron ${open ? "is-open" : ""}`} />
         </button>
         {open && (
           <div className="model-select-menu" role="listbox" aria-label="选择模型">
-            {(Object.keys(MODEL_OPTIONS) as ModelId[]).map((id) => {
-              const option = MODEL_OPTIONS[id];
-              const icon =
-                option.provider === "glm" ? <Sparkles size={14} /> : option.provider === "kimi" ? <Moon size={14} /> : <Zap size={14} />;
-              return (
-                <button
-                  key={id}
-                  role="option"
-                  aria-selected={id === modelId}
-                  className={`model-select-item ${id === modelId ? "active" : ""}`}
-                  onClick={() => {
-                    onChange(id);
-                    setOpen(false);
-                  }}
-                >
-                  {icon}
-                  <span className="model-select-item-main">
-                    <b>{option.label}</b>
-                    <small>{option.description}</small>
-                  </span>
-                  <span className="model-select-item-badge">{option.badge}</span>
-                  {id === modelId && <Check size={13} className="model-select-check" />}
-                </button>
-              );
-            })}
+            {models.map((option) => (
+              <button
+                key={option.id}
+                role="option"
+                aria-selected={option.id === modelId}
+                className={`model-select-item ${option.id === modelId ? "active" : ""}`}
+                onClick={() => pickRef.current(option)}
+              >
+                {modelIcon(option.provider, 14)}
+                <span className="model-select-item-main">
+                  <b>{option.label}</b>
+                  <small>{option.description}</small>
+                </span>
+                <span className="model-select-item-badge">{option.badge}</span>
+                {option.id === modelId && <Check size={13} className="model-select-check" />}
+              </button>
+            ))}
           </div>
         )}
       </div>
@@ -2784,7 +2958,7 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, 
   </div>;
 }
 
-function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApiKey, setGlmApiKey, glmState, onTestGlm, kimiApiKey, setKimiApiKey, kimiState, onTestKimi, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath }: {
+function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApiKey, setGlmApiKey, glmState, onTestGlm, kimiApiKey, setKimiApiKey, kimiState, onTestKimi, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath, customModels, onSaveCustomModel, onDeleteCustomModel, onTestCustomModel }: {
   open: boolean;
   onClose: () => void;
   apiKey: string;
@@ -2809,8 +2983,117 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
   onExportBackup: () => void;
   onImportBackup: (file: File) => void;
   onCopyPath: (ok: boolean) => void;
+  customModels: CustomModelConfig[];
+  onSaveCustomModel: (model: CustomModelConfig) => Promise<{ ok: boolean }>;
+  onDeleteCustomModel: (id: string) => Promise<{ ok: boolean }>;
+  onTestCustomModel: (input: { modelId?: string; baseUrl: string; model: string; apiKey?: string }) => Promise<{ ok: boolean; message?: string }>;
 }) {
   const backupFileInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- 自定义模型编辑器状态 ----
+  interface ModelDraft {
+    id?: string;
+    name: string;
+    badge: string;
+    description: string;
+    baseUrl: string;
+    model: string;
+    apiKey: string;
+    params: string;
+    deepParams: string;
+    /** 编辑已有模型时的原 Key（表单留空则保留） */
+    storedKey: string;
+    createdAt?: string;
+  }
+  const [draft, setDraft] = useState<ModelDraft | null>(null);
+  const [draftErrors, setDraftErrors] = useState<string[]>([]);
+  const [draftTest, setDraftTest] = useState<"idle" | "testing" | "valid" | "invalid">("idle");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // 关闭设置时收起模型编辑表单。
+  useEffect(() => {
+    if (open) return;
+    setDraft(null);
+    setDraftErrors([]);
+    setDraftTest("idle");
+    setConfirmDeleteId(null);
+  }, [open]);
+
+  const emptyDraft = (): ModelDraft => ({
+    id: undefined,
+    name: "",
+    badge: "",
+    description: "",
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+    params: "",
+    deepParams: "",
+    storedKey: "",
+    createdAt: undefined,
+  });
+
+  function beginAddModel() {
+    setDraft(emptyDraft());
+    setDraftErrors([]);
+    setDraftTest("idle");
+  }
+
+  function beginEditModel(model: CustomModelConfig) {
+    setDraft({
+      id: model.id,
+      name: model.name,
+      badge: model.badge ?? "",
+      description: model.description ?? "",
+      baseUrl: model.baseUrl,
+      model: model.model,
+      apiKey: "",
+      params: model.params ? JSON.stringify(model.params, null, 2) : "",
+      deepParams: model.deepParams ? JSON.stringify(model.deepParams, null, 2) : "",
+      storedKey: model.apiKey ?? "",
+      createdAt: model.createdAt,
+    });
+    setDraftErrors([]);
+    setDraftTest("idle");
+  }
+
+  async function saveDraft() {
+    if (!draft) return;
+    const result = validateCustomModel({
+      id: draft.id,
+      name: draft.name,
+      badge: draft.badge,
+      description: draft.description,
+      baseUrl: draft.baseUrl,
+      model: draft.model,
+      apiKey: draft.apiKey.trim() || draft.storedKey,
+      params: draft.params,
+      deepParams: draft.deepParams,
+      createdAt: draft.createdAt,
+    });
+    if (!result.ok) {
+      setDraftErrors(result.errors);
+      return;
+    }
+    const outcome = await onSaveCustomModel(result.value);
+    if (outcome.ok) setDraft(null);
+  }
+
+  async function testDraft() {
+    if (!draft) return;
+    setDraftTest("testing");
+    const outcome = await onTestCustomModel({
+      modelId: draft.id,
+      baseUrl: draft.baseUrl.trim(),
+      model: draft.model.trim(),
+      apiKey: draft.apiKey.trim() || draft.storedKey,
+    });
+    setDraftTest(outcome.ok ? "valid" : "invalid");
+  }
+
+  async function confirmDeleteModel(model: CustomModelConfig) {
+    setConfirmDeleteId(null);
+    await onDeleteCustomModel(model.id);
+  }
 
   async function copyBackupPath() {
     try {
@@ -2904,6 +3187,71 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                     </button>
                   ))}
                 </div>
+              </section>
+              <section className="settings-block settings-models-section">
+                <div className="settings-block-head">
+                  <span className="settings-kicker">CUSTOM MODELS</span>
+                  <h3>自定义模型</h3>
+                  <p>内置模型（GLM-4-Flash / GLM-4.7-Flash / DeepSeek Flash / Kimi K2.6）保持不变，在上方卡片配置各自 API Key；下方可自由添加任意 OpenAI 兼容模型，自定义请求地址、模型名、Key 与参数。配置保存在 data/models.json，仅本机、不进备份。</p>
+                </div>
+                {customModels.length ? (
+                  <div className="settings-model-list">
+                    {customModels.map((model) => (
+                      <div key={model.id} className={`settings-model-row ${confirmDeleteId === model.id ? "is-confirming" : ""}`}>
+                        <div className="settings-model-row-main">
+                          <b>{model.name}</b>
+                          <span className="settings-model-badge">{model.badge || CUSTOM_MODEL_BADGE}</span>
+                          <small title={`${model.baseUrl} · ${model.model}`}>{model.baseUrl} · {model.model}</small>
+                        </div>
+                        <span className={`settings-model-key-state ${model.apiKey?.trim() ? "ok" : ""}`}>
+                          {model.apiKey?.trim() ? "已配置 Key" : "未配置 Key"}
+                        </span>
+                        <div className="settings-model-row-actions">
+                          <button type="button" onClick={() => beginEditModel(model)}>编辑</button>
+                          {confirmDeleteId === model.id ? (
+                            <>
+                              <button type="button" className="danger" onClick={() => void confirmDeleteModel(model)}>确认删除</button>
+                              <button type="button" onClick={() => setConfirmDeleteId(null)}>取消</button>
+                            </>
+                          ) : (
+                            <button type="button" className="danger" onClick={() => setConfirmDeleteId(model.id)}>删除</button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="settings-model-empty">还没有自定义模型。点击下方「添加模型」接入任意 OpenAI 兼容服务。</p>
+                )}
+                {!draft && (
+                  <button type="button" className="settings-add-model" onClick={beginAddModel}><Plus size={14} /> 添加模型</button>
+                )}
+                {draft && (
+                  <div className="settings-model-form">
+                    <div className="settings-model-form-head">
+                      <b>{draft.id ? "编辑模型" : "添加模型"}</b>
+                      <button type="button" className="settings-model-form-close" aria-label="关闭表单" title="关闭" onClick={() => setDraft(null)}><X size={14} /></button>
+                    </div>
+                    <div className="settings-model-form-grid">
+                      <label>名称 *<input type="text" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：我的本地模型" autoComplete="off" /></label>
+                      <label>徽标<input type="text" value={draft.badge} onChange={(event) => setDraft({ ...draft, badge: event.target.value })} placeholder="例如：内网 · 快" autoComplete="off" /></label>
+                    </div>
+                    <label>描述<input type="text" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="一句话介绍这个模型（可选）" autoComplete="off" /></label>
+                    <label>请求地址 *<input type="text" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1/chat/completions" autoComplete="off" spellCheck={false} /></label>
+                    <label>模型名 *<input type="text" value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} placeholder="例如：gpt-4o-mini" autoComplete="off" spellCheck={false} /></label>
+                    <label>API Key<input type="password" value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={draft.storedKey ? "留空则保留已保存的 Key" : "sk-…"} autoComplete="off" /></label>
+                    <label>请求参数（JSON，可选）<textarea rows={3} value={draft.params} onChange={(event) => setDraft({ ...draft, params: event.target.value })} placeholder='{"temperature": 0.7, "max_tokens": 2048}' spellCheck={false} /></label>
+                    <label>深度模式参数（JSON，可选）<textarea rows={2} value={draft.deepParams} onChange={(event) => setDraft({ ...draft, deepParams: event.target.value })} placeholder='{"reasoning_effort": "high"}' spellCheck={false} /></label>
+                    {draftErrors.length ? <p className="settings-model-form-errors">{draftErrors.join("；")}</p> : null}
+                    {draftTest === "valid" ? <p className="key-result good">连接成功，可以开始提问。</p> : null}
+                    {draftTest === "invalid" ? <p className="key-result bad">连接失败，请检查请求地址、API Key 与模型名。</p> : null}
+                    <div className="settings-model-form-actions">
+                      <button type="button" className="test-key" disabled={!draft.baseUrl.trim() || !draft.model.trim() || draftTest === "testing"} onClick={() => void testDraft()}>{draftTest === "testing" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{draftTest === "testing" ? "测试中" : "测试连接"}</button>
+                      <button type="button" className="primary" onClick={() => void saveDraft()}><Check size={14} /> 保存</button>
+                      <button type="button" onClick={() => setDraft(null)}>取消</button>
+                    </div>
+                  </div>
+                )}
               </section>
             </div>
             <aside className="settings-layout-side">

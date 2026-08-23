@@ -12,6 +12,10 @@ import type {
   PaperMetadataLookupInput,
   PaperMetadataPatch,
 } from "@/lib/paper-metadata";
+import type {
+  ClientModelOption,
+  CustomModelConfig,
+} from "@/lib/models";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -170,8 +174,36 @@ export async function saveApiKeys(keys: ApiKeyPair): Promise<void> {
   });
 }
 
-export interface DiskBackupInfo {
-  filePath: string;
+export interface ModelRegistry {
+  /** 内置 + 自定义的展示列表（下拉 / 设置页）。 */
+  models: ClientModelOption[];
+  /** 自定义模型完整配置（含 Key，仅本机）。 */
+  custom: CustomModelConfig[];
+}
+
+/** 读取模型列表与自定义模型配置（data/models.json）。 */
+export async function listModels(): Promise<ModelRegistry> {
+  return requestJson<ModelRegistry>("/api/storage/models");
+}
+
+/** 新增或更新一个自定义模型（按 id upsert）。 */
+export async function saveCustomModel(model: CustomModelConfig): Promise<CustomModelConfig> {
+  const data = await requestJson<{ model: CustomModelConfig }>("/api/storage/models", {
+    method: "PUT",
+    body: JSON.stringify({ model }),
+  });
+  return data.model;
+}
+
+/** 删除一个自定义模型（内置模型不可删除）。 */
+export async function deleteCustomModel(id: string): Promise<void> {
+  await requestJson<{ ok: true }>("/api/storage/models", {
+    method: "DELETE",
+    body: JSON.stringify({ id }),
+  });
+}
+
+export interface DiskBackupInfo {  filePath: string;
   savedAt?: string;
   paperCount: number;
   workspaceCount: number;

@@ -2,6 +2,17 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [3.1.0] - 2026-08-16
+
+### Added
+
+- Custom models: add, edit, and delete OpenAI-compatible chat/completions models in settings (custom base URL, model name, and API key); `/api/chat` routes custom model requests from the saved configuration.
+- Model system refactored: four built-in models (GLM-4-Flash, GLM-4.7-Flash, DeepSeek, Kimi) with stable ids; the quick/deep buttons now only toggle the thinking switch instead of switching models.
+
+### Changed
+
+- UX improvements.
+
 ## [3.0.1] - 2026-08-16
 
 ### Added

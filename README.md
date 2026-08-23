@@ -48,6 +48,7 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 - Free-form questions can be sent with `Ctrl`/`Cmd` + Enter.
 - Two answer modes: `Flash` for fast translation and routine questions, `MAX 思考` for deeper explanation, summarization, and writing analysis.
 - Three providers: DeepSeek, Zhipu GLM, and Kimi (`kimi-k2.6`); each has its own API key and connection test. GLM offers two tiers, `glm-4-flash` (free, officially supports high concurrency) and `glm-4.7-flash`, used as fallbacks for each other. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
+- Model system: four built-in models (GLM-4-Flash, GLM-4.7-Flash, DeepSeek, Kimi), plus custom models added in settings (OpenAI-compatible chat/completions with custom base URL, model name, and API key; freely add/edit/delete). The quick/deep buttons only toggle the thinking switch.
 - **AI reading companion**: five personas (sarcastic, gentle, philosophical, encouraging, mentor) that react to your questions and answers; hide it anytime (hidden = fully unloaded, no model requests). Persona prompts are editable at `public/buddy-personas.txt`, with local fallback lines when no API key is set.
 - Multi-turn conversations are grouped by page/selection; a question index lets you jump back to earlier turns; individual conversations can be deleted.
 - Translation, context explanation, concept explanation, free Q&A, reading notes, mind map, and writing analysis all use dedicated structured prompts.

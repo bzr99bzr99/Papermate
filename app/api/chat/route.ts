@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { loadSystemPrompt, loadTaskInstructions, type Task } from "@/lib/prompts";
 import { readApiKeyFile } from "@/lib/api-keys";
+import { resolveModel, type ResolvedModel } from "@/lib/models-store";
+import type { CustomModelConfig } from "@/lib/models";
 
 export const runtime = "nodejs";
 
@@ -32,7 +34,7 @@ const providerTargets: Record<Provider, { url: string; model: string; fallbackMo
   },
 };
 
-/** 前端下拉的 4 个模型 → 具体模型代号（modelId 与文字标签一一对应）。 */
+/** 内置模型下拉 → 具体模型代号（modelId 与文字标签一一对应）。 */
 const modelById: Record<string, { provider: Provider; model: string; fallbackModels?: string[] }> = {
   "glm-flash": { provider: "glm", model: "glm-4-flash", fallbackModels: ["glm-4.7-flash"] },
   "glm-47": { provider: "glm", model: "glm-4.7-flash", fallbackModels: ["glm-4-flash"] },
@@ -75,17 +77,132 @@ function sseTextStream(stream: ReadableStream<Uint8Array>) {
   });
 }
 
-export async function POST(request: Request) {
-  const body = (await request.json()) as {
-    provider?: Provider;
-    modelId?: string;
-    apiKey?: string;
-    mode?: "fast" | "deep";
-    task?: Task;
-    context?: string;
-    question?: string;
-    messages?: IncomingMessage[];
+/** 可重试的上游错误（GLM 免费档 429 冷却窗口较长，用递增退避覆盖）。 */
+const RETRYABLE_UPSTREAM_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRY_BACKOFF_MS = [3000, 7000, 13000];
+
+interface ChatRequestBody {
+  provider?: Provider;
+  modelId?: string;
+  apiKey?: string;
+  mode?: "fast" | "deep";
+  task?: Task;
+  context?: string;
+  question?: string;
+  messages?: IncomingMessage[];
+}
+
+function buildUserContent(context: string, question: string): string {
+  return [
+    "以下是来自用户本地论文的必要文本。",
+    context,
+    question ? `\n用户请求：${question}` : "\n请按任务要求完成。",
+  ].join("\n");
+}
+
+async function requestWithRetry(
+  url: string,
+  init: RequestInit,
+  onStatus?: (status: number) => void,
+): Promise<Response | undefined> {
+  let upstream: Response | undefined;
+  for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+    upstream = await fetch(url, init);
+    onStatus?.(upstream.status);
+    if (upstream.ok || !RETRYABLE_UPSTREAM_STATUS.has(upstream.status) || attempt === RETRY_BACKOFF_MS.length) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
+  }
+  return upstream;
+}
+
+function streamOrError(upstream: Response | undefined, label: string, upstreamStatus = 0): Response {
+  if (!upstream || !upstream.ok || !upstream.body) {
+    const status = upstreamStatus || 502;
+    const reason =
+      status === 429
+        ? "（上游并发/速率限制，已自动重试多次仍失败，请稍等约 20 秒后再试）"
+        : status === 401
+          ? "（API Key 无效或已失效）"
+          : "";
+    return NextResponse.json(
+      { error: `${label} 请求失败（HTTP ${status}）${reason}，请检查 Key、额度和网络。` },
+      { status: status || 502, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  return new Response(sseTextStream(upstream.body), {
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store, no-transform" },
+  });
+}
+
+/** 自定义模型请求：地址、模型名、Key、参数全部来自设置中的模型配置。 */
+async function handleCustomRequest(
+  config: CustomModelConfig,
+  body: ChatRequestBody,
+): Promise<Response> {
+  const apiKey = config.apiKey?.trim();
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: `请先在设置中为「${config.name}」配置 API Key。` },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const task = body.task ?? "free";
+  const mode = body.mode === "deep" ? "deep" : "fast";
+  const context = body.context?.slice(0, 160000) ?? "";
+  const question = body.question?.slice(0, 12000) ?? "";
+  const messages = (body.messages ?? []).slice(-12).map((message) => ({
+    role: message.role,
+    content: message.content.slice(0, 160000),
+  }));
+  if (!question && !context) {
+    return NextResponse.json({ error: "没有可供分析的论文内容。" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+  }
+
+  const instructions = loadTaskInstructions();
+  const systemPrompt = loadSystemPrompt();
+  // stream 与 messages 由服务端强制，用户配置的 params 无法覆盖。
+  const upstreamBody = {
+    model: config.model,
+    stream: true,
+    ...(config.params ?? {}),
+    ...(mode === "deep" ? config.deepParams ?? {} : {}),
+    messages: [
+      { role: "system", content: `${systemPrompt}\n\n任务要求：\n${instructions[task]}` },
+      ...messages,
+      { role: "user", content: buildUserContent(context, question) },
+    ],
   };
+  let upstreamStatus = 0;
+  try {
+    const upstream = await requestWithRetry(
+      config.baseUrl,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify(upstreamBody),
+      },
+      (status) => {
+        upstreamStatus = status;
+      },
+    );
+    return streamOrError(upstream, config.name, upstreamStatus);
+  } catch {
+    return NextResponse.json({ error: `无法连接 ${config.name}，请检查请求地址与网络后重试。` }, { status: 502, headers: { "Cache-Control": "no-store" } });
+  }
+}
+
+export async function POST(request: Request) {
+  const body = (await request.json()) as ChatRequestBody;
+
+  // 自定义模型：modelId 命中自定义配置时按模型配置请求（内置模型路径不受影响）。
+  const resolved: ResolvedModel | undefined = resolveModel(body.modelId);
+  if (resolved?.kind === "custom") {
+    return handleCustomRequest(resolved.config, body);
+  }
+
   // 模型按前端下拉的 modelId 精确选择（4 个模型互不干扰）；
   // 兼容旧调用方：无 modelId 时按 provider + mode 推导。
   const picked = body.modelId ? modelById[body.modelId] : undefined;
@@ -106,21 +223,12 @@ export async function POST(request: Request) {
   if (!apiKey) return NextResponse.json({ error: `请先在设置中输入${target.label} API Key。` }, { status: 400, headers: { "Cache-Control": "no-store" } });
   if (!question && !context) return NextResponse.json({ error: "没有可供分析的论文内容。" }, { status: 400, headers: { "Cache-Control": "no-store" } });
 
-  const userContent = [
-    "以下是来自用户本地论文的必要文本。",
-    context,
-    question ? `\n用户请求：${question}` : "\n请按任务要求完成。",
-  ].join("\n");
-
   // 提示词来自项目 public/prompts.txt（可随时编辑，缺失任务回退内置默认）；
   // [system] 为基础系统提示词（"你是一个论文阅读助手"人设）。
   const instructions = loadTaskInstructions();
   const systemPrompt = loadSystemPrompt();
 
-  // GLM 免费档等上游对 429 限流有较长的冷却窗口（实测约 12-20 秒），
-  // 这里在返回错误前用递增退避重试，覆盖冷却期后直接开始流式输出。
-  const RETRYABLE_UPSTREAM_STATUS = new Set([408, 429, 500, 502, 503, 504]);
-  const RETRY_BACKOFF_MS = [3000, 7000, 13000];
+  let upstreamStatus = 0;
   try {
     // 快速/深度只切换 thinking（非思考/思考），不再更换模型：
     // 模型 = modelId 对应的模型（旧调用方按 provider+mode 推导），404 时走回退候选。
@@ -129,11 +237,11 @@ export async function POST(request: Request) {
       (model, index, list) => model && list.indexOf(model) === index,
     );
     let upstream: Response | undefined;
-    let upstreamStatus = 0;
     for (const model of models) {
       let modelStatus = 0;
-      for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
-        upstream = await fetch(target.url, {
+      upstream = await requestWithRetry(
+        target.url,
+        {
           method: "POST",
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
           cache: "no-store",
@@ -149,38 +257,20 @@ export async function POST(request: Request) {
                 content: `${systemPrompt}\n\n任务要求：\n${instructions[task]}`,
               },
               ...messages,
-              { role: "user", content: userContent },
+              { role: "user", content: buildUserContent(context, question) },
             ],
           }),
-        });
-        modelStatus = upstream.status;
-        upstreamStatus = modelStatus;
-        if (
-          upstream.ok ||
-          !RETRYABLE_UPSTREAM_STATUS.has(modelStatus) ||
-          attempt === RETRY_BACKOFF_MS.length
-        ) {
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS[attempt]));
-      }
+        },
+        (status) => {
+          modelStatus = status;
+          upstreamStatus = status;
+        },
+      );
       if (upstream?.ok) break;
       // 404 通常是“模型不存在/无权限”：换下一个候选模型重试；其他错误码不再换模型。
       if (modelStatus !== 404 || model === models[models.length - 1]) break;
     }
-  if (!upstream || !upstream.ok || !upstream.body) {
-    const status = upstreamStatus || 502;
-    const reason =
-      status === 429
-        ? "（上游并发/速率限制，已自动重试多次仍失败，请稍等约 20 秒后再试）"
-        : status === 401
-          ? "（API Key 无效或已失效）"
-          : "";
-    return NextResponse.json({ error: `${target.label} 请求失败（HTTP ${status}）${reason}，请检查 Key、额度和网络。` }, { status: status || 502, headers: { "Cache-Control": "no-store" } });
-  }
-  return new Response(sseTextStream(upstream.body), {
-    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store, no-transform" },
-  });
+    return streamOrError(upstream, target.label, upstreamStatus);
   } catch {
     return NextResponse.json({ error: `无法连接 ${target.label}，请稍后重试。` }, { status: 502, headers: { "Cache-Control": "no-store" } });
   }
