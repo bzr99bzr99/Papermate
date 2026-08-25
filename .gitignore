@@ -6,6 +6,11 @@ coverage/
 *.lnk
 .env*
 
+# 本地 npm 运行残留
+.npm-cache/
+.npm-ci.log
+.npm-cache.log
+
 # 开发服务器临时日志与导出的用户数据备份（任何目录下都不跟踪）
 .dev-server.*.log
 papermate-backup-*.json

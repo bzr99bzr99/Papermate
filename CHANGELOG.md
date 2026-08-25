@@ -2,6 +2,17 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [3.3.0] - 2026-08-16
+
+### Added
+
+- Reader panning shortcut: hold `Alt` and drag with the left mouse button to pan the paper freely (the toolbar hand-button mode is unchanged; the old Space+drag shortcut is removed because Space also scrolls the page).
+- Double-click a word in the original PDF text layer to select it instantly, ready to ask about or translate.
+
+### Fixed
+
+- Translation prompt rewritten: concise, direct output with no preamble/ending/summary; multi-fragment selections are labeled `# 1`/`# 2`; single sentences and paragraphs now get a grammar explanation after the translation. Synced into `public/prompts.txt`, the built-in fallback (`lib/prompts.ts`), and the legacy DeepSeek route.
+
 ## [3.2.0] - 2026-08-16
 
 ### Changed

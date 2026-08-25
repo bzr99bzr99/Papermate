@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   CSSProperties,
+  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
@@ -810,6 +811,25 @@ function selectionItemsBetweenPoints(
     textStartOffset: lowOffset,
     textEndOffset: highOffset,
   };
+}
+
+// 双击选词：单词 = 以字母/数字/下划线开头，可含连字符、撇号的连续串（含中文等非拉丁字符）。
+const WORD_PATTERN = /[\p{L}\p{N}_][\p{L}\p{N}_'’-]*/gu;
+
+function wordAtOffset(str: string, offset: number): { start: number; end: number } | undefined {
+  let nearest: { start: number; end: number; distance: number } | undefined;
+  for (const match of str.matchAll(WORD_PATTERN)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    // 光标落在单词内（含恰好落在边界上）→ 直接选中该词。
+    if (start <= offset && offset <= end) return { start, end };
+    // 光标落在标点/空白上时，选择最近的单词。
+    const distance = offset < start ? start - offset : offset - end;
+    if (!nearest || distance < nearest.distance) {
+      nearest = { start, end, distance };
+    }
+  }
+  return nearest ? { start: nearest.start, end: nearest.end } : undefined;
 }
 
 function allowedSpansForItems(
@@ -2201,8 +2221,7 @@ export function PdfReader({
     scrollLeft: number;
     scrollTop: number;
   } | null>(null);
-  // 空格按住时的临时平移（松开即恢复）；panClickSuppressRef 抑制拖动后紧跟的 click。
-  const spacePanRef = useRef(false);
+  // Alt 按住时的临时平移（pointerdown 的 altKey 判断）；panClickSuppressRef 抑制拖动后紧跟的 click。
   const panClickSuppressRef = useRef(false);
   const selectionRef = useRef<{
     pointerId: number;
@@ -2384,55 +2403,8 @@ export function PdfReader({
     clearCurrentSelectionHighlights(readerRef.current);
   }, [panMode]);
 
-  // 空格 + 左键拖动：临时平移阅读器（不改变工具栏拖动模式开关）。
-  useEffect(() => {
-    const isEditableTarget = (event: KeyboardEvent) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) return false;
-      return (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT" ||
-        target.isContentEditable
-      );
-    };
-    const releaseSpacePan = () => {
-      if (!spacePanRef.current) return;
-      spacePanRef.current = false;
-      const reader = readerRef.current;
-      if (reader) {
-        reader.style.cursor = "";
-        reader.classList.remove("space-pan");
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== "Space" || event.repeat || spacePanRef.current) return;
-      // 输入框内不劫持空格（正常输入空格）；焦点在按钮上时 preventDefault 会
-      // 同时阻止按钮的空格激活，保证「空格+左键」随时可用。
-      if (isEditableTarget(event)) return;
-      event.preventDefault();
-      spacePanRef.current = true;
-      const reader = readerRef.current;
-      if (reader) {
-        reader.style.cursor = "grab";
-        reader.classList.add("space-pan");
-      }
-      window.getSelection()?.removeAllRanges();
-    };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.code !== "Space") return;
-      releaseSpacePan();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", releaseSpacePan);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", releaseSpacePan);
-      releaseSpacePan();
-    };
-  }, []);
+  // Alt + 左键拖动：临时平移阅读器（不改变工具栏拖动模式开关），
+  // 通过 pointerdown 的 altKey 判断，无需键盘监听，也不会触发空格翻页。
 
   useEffect(() => {
     setPageNumber(activeAnchor?.page ?? 1);
@@ -2786,10 +2758,9 @@ export function PdfReader({
       scrollLeft: reader.scrollLeft,
       scrollTop: reader.scrollTop,
     };
-    // 抑制拖动结束后紧跟的 click（空间平移/拖动模式下点击不应触发阅读器行为）。
+    // 抑制拖动结束后紧跟的 click（临时平移/拖动模式下点击不应触发阅读器行为）。
     panClickSuppressRef.current = true;
     setPanActive(true);
-    if (spacePanRef.current) reader.style.cursor = "grabbing";
     reader.setPointerCapture?.(event.pointerId);
   }
 
@@ -2807,13 +2778,13 @@ export function PdfReader({
     panRef.current = null;
     setPanActive(false);
     readerRef.current?.releasePointerCapture?.(event.pointerId);
-    if (spacePanRef.current && readerRef.current) readerRef.current.style.cursor = "grab";
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLElement>) {
     pinHandledOnPointerUpRef.current = false;
     panClickSuppressRef.current = false;
-    if (panMode || spacePanRef.current) {
+    // Alt + 左键：临时平移（不改变工具栏拖动模式开关）。
+    if (panMode || event.altKey) {
       startPan(event);
       return;
     }
@@ -3051,6 +3022,54 @@ export function PdfReader({
     }
   }
 
+  /** 双击点所在文本项 → 生成该单词的锚点（带精确文本项偏移，高亮定位不受同词重复影响）。 */
+  function anchorForWordAtPoint(stack: HTMLElement, clientX: number, clientY: number): TextAnchor | undefined {
+    const point = selectionPointAtPosition(stack, undefined, clientX, clientY);
+    if (!point) return undefined;
+    const page = paper.pages.find((entry) => entry.page === point.page);
+    if (!page) return undefined;
+    const items = page.textItems ?? [];
+    const item = items[point.itemIndex];
+    if (!item?.str) return undefined;
+    const offset = Math.min(Math.max(0, point.offset), item.str.length);
+    const word = wordAtOffset(item.str, offset);
+    if (!word) return undefined;
+    const quote = item.str.slice(word.start, word.end).trim();
+    if (!quote) return undefined;
+    const section =
+      outlineRef.current.find((entry) => entry.id === activeChapterRef.current?.sectionId)?.title ??
+      sectionForPage(outlineRef.current, point.page)?.title;
+    return makeAnchor(
+      paper.id,
+      page,
+      quote,
+      findQuoteStart(page, quote),
+      section,
+      {
+        blockIds: item.blockId ? [item.blockId] : [],
+        textItemStart: point.itemIndex,
+        textItemEnd: point.itemIndex,
+        textStartOffset: word.start,
+        textEndOffset: word.end,
+      },
+    );
+  }
+
+  /** 左键双击：快捷选中当前单词（与普通划选同一入口，翻译模式开启时自动翻译）。 */
+  function handleReaderDoubleClick(event: ReactMouseEvent<HTMLElement>) {
+    if (panMode || panRef.current || event.altKey) return;
+    const reader = readerRef.current;
+    if (!reader || !reader.contains(event.target as Node)) return;
+    // 指针捕获会把 click/dblclick 重定向到阅读器列本身，这里按坐标定位文本层。
+    const stack = stackForPoint(event.clientX, event.clientY);
+    if (!stack || !reader.contains(stack)) return;
+    event.preventDefault();
+    closeHighlightPopover();
+    const anchor = anchorForWordAtPoint(stack, event.clientX, event.clientY);
+    if (!anchor) return;
+    onSelectAnchor(anchor, false);
+  }
+
   return (
     <div className="reader-wrap">
       <div className="reader-toolbar">
@@ -3116,14 +3135,14 @@ export function PdfReader({
                 className={panMode ? "active" : ""}
                 aria-pressed={panMode}
                 aria-label={panMode ? "退出拖动模式" : "进入拖动模式"}
-                title={panMode ? "退出拖动模式" : "拖动模式"}
+                title={panMode ? "退出拖动模式" : "拖动模式（或按住 Alt + 左键拖动）"}
                 onClick={() => setPanMode((current) => !current)}
               >
                 <Hand size={15} />
               </button>
             </div>
           </div>
-          <span className="selection-tip"><MousePointer2 size={14} /> 划选提问 · Ctrl/Cmd 追加</span>
+          <span className="selection-tip"><MousePointer2 size={14} /> 划选提问 · Ctrl/Cmd 追加 · 双击选词 · Alt 拖动平移</span>
         </div>
         <div className="reader-restore reader-restore-right">
           {rightCollapsed ? (
@@ -3140,6 +3159,7 @@ export function PdfReader({
         onPointerCancel={handlePointerCancel}
         onPointerLeave={handlePointerLeave}
         onClick={handleReaderClick}
+        onDoubleClick={handleReaderDoubleClick}
         onScroll={handleScroll}
         aria-label="论文阅读器"
       >

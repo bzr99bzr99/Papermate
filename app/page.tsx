@@ -543,6 +543,8 @@ export default function Home() {
   const [contextMode, setContextMode] = useState(false);
   // 翻译模式：开启后划选原文立即翻译，并保持按钮选中状态。
   const [translateMode, setTranslateMode] = useState(false);
+  // 点击空白处清空选区后，右侧问答面板回到空白态（不回落显示其他历史会话）。
+  const [panelCleared, setPanelCleared] = useState(false);
   const [pendingColor, setPendingColor] = useState<HighlightColor>(HIGHLIGHT_COLORS[0]);
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
   const [backfillingId, setBackfillingId] = useState<string>();
@@ -971,6 +973,7 @@ export default function Home() {
     setActiveAnchors([]);
     setActiveConversationId(undefined);
     setContextMode(false);
+    setPanelCleared(false);
     if (!paper) {
       setWorkspace(blankWorkspace);
       return;
@@ -999,6 +1002,10 @@ export default function Home() {
   );
 
   const selectedConversation = useMemo(() => {
+    // 点击空白处清空选区后：面板保持空白，不回落显示其他历史会话。
+    if (panelCleared && !activeAnchor && !activeSelection && !activeConversationId) {
+      return undefined;
+    }
     const byId = workspace.conversations.find((conversation) => conversation.id === activeConversationId);
     if (byId) return byId;
     if (activeSelection) {
@@ -1020,7 +1027,7 @@ export default function Home() {
       ) ??
       workspace.conversations.find((conversation) => isNormalScope(conversation)) ??
       workspace.conversations.at(0);
-  }, [activeAnchor, activeConversationId, activeSelection, workspace.conversations]);
+  }, [activeAnchor, activeConversationId, activeSelection, panelCleared, workspace.conversations]);
 
   function commitWorkspace(next: PaperWorkspace) {
     setWorkspace(next);
@@ -1292,6 +1299,7 @@ export default function Home() {
 
   function selectAnchor(anchor: TextAnchor, additive: boolean) {
     if (!paper) return;
+    setPanelCleared(false);
     const nextAnchors = additive
       ? [...activeAnchors.filter((item) => item.id !== anchor.id), anchor].slice(
           0,
@@ -1312,8 +1320,9 @@ export default function Home() {
     setActiveConversationId(existing?.id);
     setPendingColor(defaultHighlightColor(workspace.conversations.length));
     openView("chat");
-    if (translateMode && !additive) {
-      // 翻译模式已开启：完成一次新划选后立即翻译，并保持模式选中。
+    if (translateMode && !additive && !existing) {
+      // 翻译模式已开启：仅对「没有历史问答的新选区」自动翻译；
+      // 点击已问答过的段落只激活选区、查看历史问答，不自动翻译。
       void sendQuestion("translate", undefined, nextAnchors);
     }
     if (additive && nextAnchors.length === MAX_SELECTION_FRAGMENTS) {
@@ -1324,6 +1333,8 @@ export default function Home() {
   function clearActiveSelection() {
     setActiveAnchors([]);
     setActiveConversationId(undefined);
+    // 右侧问答面板恢复空白（输入框内容保留）；重新划选/提问时恢复。
+    setPanelCleared(true);
   }
 
   function openView(view: RightView) {
@@ -1493,6 +1504,7 @@ export default function Home() {
 
   async function sendQuestion(kind: PromptKind, forcedQuestion?: string, overrideAnchors?: TextAnchor[]) {
     if (!paper) return;
+    setPanelCleared(false);
     const activeApiKey = currentModelApiKey();
     const providerLabel = currentModelLabel();
     if (!activeApiKey.trim()) {
@@ -1504,7 +1516,9 @@ export default function Home() {
       );
       return;
     }
-    const requestedQuestion = forcedQuestion?.trim() || question.trim();
+    // 翻译是固定指令：不使用输入框内容作为问题（除非显式传入 forcedQuestion），
+    // 输入框里的草稿内容保持不变、也不会被发送。
+    const requestedQuestion = forcedQuestion?.trim() || (kind === "translate" ? "" : question.trim());
     if (kind === "context" && !requestedQuestion) {
       setNotice("请先在输入框里输入问题，再发送。");
       return;
@@ -1637,7 +1651,8 @@ export default function Home() {
     updateConversation(currentConversation);
     setActiveConversationId(currentConversation.id);
     setPendingColor(defaultHighlightColor(baseConversations.length + 1));
-    setQuestion("");
+    // 翻译是固定指令，不清空输入框里的草稿内容；其他提问发送后清空。
+    if (kind !== "translate") setQuestion("");
     beginChat(currentConversation.id);
     const selectedContext = buildContext(paper.pages, selectionAnchors);
     let historyMessages: Array<{ role: "user" | "assistant"; content: string }>;
@@ -2848,12 +2863,19 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
         disabled={generating}
         className={translateMode ? "active" : ""}
         aria-pressed={translateMode}
-        title="开启后划选原文自动翻译"
+        title="开启后划选新内容自动翻译；有选区时点击立即翻译当前选区，无选区时再点关闭"
         onClick={() => {
-          const next = !translateMode;
-          onTranslateModeChange(next);
-          // 已有选区时点击翻译：立即翻译，并保持翻译模式选中。
-          if (next && selectionAnchors.length) onPrompt("translate");
+          if (!translateMode) {
+            onTranslateModeChange(true);
+            // 已有选区时点击翻译：立即翻译，并保持翻译模式选中。
+            if (selectionAnchors.length) onPrompt("translate");
+          } else if (selectionAnchors.length) {
+            // 模式已开启且有选区：点击即翻译当前选区，模式保持开启。
+            onPrompt("translate");
+          } else {
+            // 无选区时再点：关闭翻译模式。
+            onTranslateModeChange(false);
+          }
         }}
       >翻译</button>
       <button
@@ -2864,7 +2886,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
       >结合上下文解释</button>
     </div>
     <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onPrompt(contextMode ? "context" : "free"); } }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
-    <p className="input-hint">{translateMode ? "翻译模式已开启 · 划选原文自动翻译（再次点击「翻译」关闭）" : contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "Enter 发送 · Shift + Enter 换行 · 回答优先依据论文原文"}</p>
+    <p className="input-hint">{translateMode ? "翻译模式已开启 · 划选新内容自动翻译 · 点击已问答段落仅查看历史（点「翻译」翻译当前选区）" : contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "Enter 发送 · Shift + Enter 换行 · 回答优先依据论文原文"}</p>
   </div>;
 }
 

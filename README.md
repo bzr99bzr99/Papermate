@@ -26,7 +26,7 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 ### Reading & Selection
 
 - PDF.js renders each page in its original published layout, with a transparent text layer so selections stay aligned with the printed text.
-- Zoom, pan, page navigation, chapter outline, and `Ctrl`/`Cmd` + wheel zoom keep the reading position stable.
+- Zoom, pan, page navigation, chapter outline, and `Ctrl`/`Cmd` + wheel zoom keep the reading position stable; hold `Alt` and drag with the left button to pan temporarily, and double-click a word to select it instantly.
 - Select a paragraph and ask, or hold `Ctrl`/`Cmd` to append more fragments; up to 20 fragments from different pages can be combined.
 - Native citation and figure links in the PDF are clickable: internal links jump to the target page and external links open the URL.
 - Selections and conversations can be highlighted with different colors and deleted later.
