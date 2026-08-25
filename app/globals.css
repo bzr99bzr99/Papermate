@@ -398,6 +398,11 @@ body.papermate-resizing .resize-handle { transition: none; }
 .reader-column.is-dragging .original-page-stack,
 .reader-column.is-dragging .original-text-layer,
 .reader-column.is-dragging .original-text-layer span { cursor: grabbing; }
+/* 空格按住时的临时平移（松开即恢复） */
+.reader-column.space-pan,
+.reader-column.space-pan .original-page-stack,
+.reader-column.space-pan .original-text-layer,
+.reader-column.space-pan .original-text-layer span { cursor: grab; }
 .reader-restore { display: flex; gap: 6px; }
 .reader-restore button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-4); padding: 5px 8px; color: var(--ink-soft); font-size: 10px; }
 .reader-restore button:hover { border-color: var(--accent-strong); color: var(--accent); }
@@ -671,7 +676,7 @@ body.papermate-resizing .resize-handle { transition: none; }
 .selection-fragment-toggle:hover { background: var(--panel-glass); color: var(--accent); }
 .selection-fragment-toggle svg { transition: transform .16s ease; }
 .selection-fragment-toggle.expanded svg { transform: rotate(90deg); }
-.quick-prompts { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 12px; }
+.quick-prompts { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0; }
 .quick-prompts button, .artifact-actions button { border: 1px solid var(--line-dark); border-radius: 5px; background: var(--panel); padding: 5px 7px; color: var(--ink-soft); font-size: 10px; }
 .quick-prompts button:hover, .artifact-actions button:hover { border-color: var(--line-strong); color: var(--accent); }
 .quick-prompts button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 700; }

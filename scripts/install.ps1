@@ -12,7 +12,8 @@ param(
     [switch]$ChooseInstallDir,
     [switch]$SkipShortcuts,
     [switch]$SkipDependencies,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$ForceFull
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,6 +95,69 @@ function Get-PackageVersion {
         # Fall through to a safe default when package.json cannot be parsed.
     }
     return "0.0.0"
+}
+
+# 计算参与构建的源码指纹（路径 + 大小 + 修改时间），用于增量更新判断。
+# 排除不会影响构建产物的目录与文件：node_modules、.next、.git、data（用户数据）、
+# 截图（仅 README 使用）、根目录文档（*.md）、启动脚本（scripts/ 与 *.bat，另行部署）、
+# 以及本机辅助目录（.github、.dsh-vision-toolkit、.vischeck、logs、coverage）。
+function Get-SourceFingerprint {
+    param([string]$SourceDir)
+    try {
+        $sourceFull = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        $excludedDirs = @(
+            "node_modules", ".next", ".git", "data", "截图", ".github",
+            ".dsh-vision-toolkit", ".vischeck", "logs", "coverage", "scripts"
+        )
+        $allFiles = @()
+        foreach ($item in Get-ChildItem -LiteralPath $sourceFull -Force -ErrorAction SilentlyContinue) {
+            if ($item.PSIsContainer) {
+                if ($excludedDirs -contains $item.Name) { continue }
+                $allFiles += @(Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)
+            }
+            else {
+                $allFiles += $item
+            }
+        }
+        $parts = @()
+        foreach ($file in ($allFiles | Sort-Object { $_.FullName.ToLowerInvariant() })) {
+            $rel = $file.FullName.Substring($sourceFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
+            # 根目录文档、启动器与生成文件不参与构建指纹。
+            $isRootFile = $rel.IndexOf([System.IO.Path]::DirectorySeparatorChar) -lt 0
+            if ($isRootFile) {
+                if ($rel -match '\.(md|bat|tsbuildinfo)$') { continue }
+                if ($rel -in @("next-env.d.ts", ".papermate-installed.json", ".gitignore", ".editorconfig", ".gitattributes")) { continue }
+                if ($rel -like ".env*") { continue }
+            }
+            $parts += "$rel`:$($file.Length):$($file.LastWriteTimeUtc.Ticks)"
+        }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    catch {
+        return ""
+    }
+}
+
+function Test-FilesIdentical {
+    param([string]$First, [string]$Second)
+    if (-not (Test-Path -LiteralPath $First) -or -not (Test-Path -LiteralPath $Second)) {
+        return $false
+    }
+    try {
+        $firstInfo = Get-Item -LiteralPath $First
+        $secondInfo = Get-Item -LiteralPath $Second
+        if ($firstInfo.Length -ne $secondInfo.Length) {
+            return $false
+        }
+        $firstHash = (Get-FileHash -LiteralPath $First -Algorithm SHA256).Hash
+        $secondHash = (Get-FileHash -LiteralPath $Second -Algorithm SHA256).Hash
+        return $firstHash -eq $secondHash
+    }
+    catch {
+        return $false
+    }
 }
 
 function Wait-ForPortFree {
@@ -419,59 +483,106 @@ if ($Upgrade -and -not (Wait-ForPortFree $PreferredPort 15)) {
     Write-Host "端口 $PreferredPort 仍被占用，安装器会尝试其他可用端口。" -ForegroundColor Yellow
 }
 
+# ---------- 增量更新决策 ----------
+# 有已安装记录（升级场景）时，用源码指纹判断哪些步骤可以跳过：
+# 源码未变化 → 跳过复制、依赖安装与构建；依赖清单未变化 → 跳过 npm install。
+$sourceFingerprint = Get-SourceFingerprint $sourceProjectDir
+$prevFingerprint = ""
+if ($installedConfig -and $installedConfig.sourceFingerprint) {
+    $prevFingerprint = [string]$installedConfig.sourceFingerprint
+}
+$hasInstalledRecord = $null -ne $installedConfig
+$sourceChanged = $ForceFull -or -not $hasInstalledRecord -or $sourceFingerprint -eq "" -or $sourceFingerprint -ne $prevFingerprint
+$nodeModulesDir = Join-Path $projectDir "node_modules"
+$needDependencies = -not (Test-Path -LiteralPath $nodeModulesDir)
+$depsChanged = $false
+if (-not (Test-SamePath $projectDir $sourceProjectDir) -and (Test-Path -LiteralPath (Join-Path $projectDir "package.json"))) {
+    # 安装副本模式：对比源码与已安装副本的依赖清单（package.json / package-lock.json）。
+    $depsChanged = -not (
+        (Test-FilesIdentical (Join-Path $sourceProjectDir "package.json") (Join-Path $projectDir "package.json")) -and
+        (Test-FilesIdentical (Join-Path $sourceProjectDir "package-lock.json") (Join-Path $projectDir "package-lock.json"))
+    )
+}
+else {
+    # 就地模式：node_modules 与源码同目录，源码变化即视为依赖可能变化（npm 会快速跳过未变化部分）。
+    $depsChanged = $sourceChanged
+}
+if ($sourceChanged) {
+    Write-Host "检测到源码变化，执行增量更新（只同步变化的文件）。" -ForegroundColor Yellow
+}
+else {
+    Write-Host "源码与上次安装一致，跳过项目复制、依赖安装与构建。" -ForegroundColor Yellow
+}
+
 if (-not (Test-SamePath $projectDir $sourceProjectDir)) {
-    Write-Step "复制项目到安装位置"
-    Copy-ProjectToInstallDir -Source $sourceProjectDir -Destination $projectDir
-    $packageVersion = Get-PackageVersion $sourceProjectDir
-    $marker = [ordered]@{
-        appName          = $appName
-        version          = $packageVersion
-        sourceProjectDir = $sourceProjectDir
-        installedAt      = (Get-Date).ToString("s")
+    if ($sourceChanged) {
+        Write-Step "复制项目到安装位置（仅同步有变化的文件）"
+        Copy-ProjectToInstallDir -Source $sourceProjectDir -Destination $projectDir
+        $packageVersion = Get-PackageVersion $sourceProjectDir
+        $marker = [ordered]@{
+            appName          = $appName
+            version          = $packageVersion
+            sourceProjectDir = $sourceProjectDir
+            installedAt      = (Get-Date).ToString("s")
+        }
+        $markerPath = Join-Path $projectDir ".papermate-installed.json"
+        [System.IO.File]::WriteAllText($markerPath, ($marker | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($true)))
     }
-    $markerPath = Join-Path $projectDir ".papermate-installed.json"
-    [System.IO.File]::WriteAllText($markerPath, ($marker | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($true)))
+    else {
+        Write-Host "源码没有变化，跳过项目复制（安装副本已是最新）。" -ForegroundColor Yellow
+    }
 }
 
 if (-not $SkipDependencies) {
-    Write-Step "安装项目依赖（首次可能需要几分钟）"
-    $npmSucceeded = $false
-    for ($attempt = 1; $attempt -le 3 -and -not $npmSucceeded; $attempt++) {
-        Write-Host "npm install（第 $attempt 次尝试）..."
+    $npmNeeded = $needDependencies -or ($sourceChanged -and $depsChanged)
+    if ($npmNeeded) {
+        Write-Step "安装项目依赖（首次可能需要几分钟）"
+        $npmSucceeded = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $npmSucceeded; $attempt++) {
+            Write-Host "npm install（第 $attempt 次尝试）..."
+            Stop-ProjectNodeProcesses $projectDir
+            Push-Location $projectDir
+            try {
+                & $npm install --no-audit --no-fund --prefer-offline
+                if ($LASTEXITCODE -eq 0) {
+                    $npmSucceeded = $true
+                }
+                else {
+                    Write-Host "依赖安装未成功，正在等待文件锁释放后重试..."
+                    Stop-ProjectNodeProcesses $projectDir
+                    Start-Sleep -Seconds 3
+                }
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        if (-not $npmSucceeded) {
+            throw "依赖安装失败。请关闭 PaperMate 服务和其他占用 node_modules 的程序，然后重新运行一键安装。"
+        }
+    }
+    else {
+        Write-Host "依赖清单没有变化，跳过 npm install（复用已有 node_modules）。" -ForegroundColor Yellow
+    }
+}
+
+if (-not $SkipBuild) {
+    if ($sourceChanged -or -not (Test-Path -LiteralPath (Join-Path $projectDir ".next\BUILD_ID"))) {
+        Write-Step "构建正式版本（首次可能需要几分钟）"
         Stop-ProjectNodeProcesses $projectDir
         Push-Location $projectDir
         try {
-            & $npm install --no-audit --no-fund
-            if ($LASTEXITCODE -eq 0) {
-                $npmSucceeded = $true
-            }
-            else {
-                Write-Host "依赖安装未成功，正在等待文件锁释放后重试..."
-                Stop-ProjectNodeProcesses $projectDir
-                Start-Sleep -Seconds 3
+            & $npm run build
+            if ($LASTEXITCODE -ne 0) {
+                throw "构建失败，请查看上方输出。"
             }
         }
         finally {
             Pop-Location
         }
     }
-    if (-not $npmSucceeded) {
-        throw "依赖安装失败。请关闭 PaperMate 服务和其他占用 node_modules 的程序，然后重新运行一键安装。"
-    }
-}
-
-if (-not $SkipBuild) {
-    Write-Step "构建正式版本（首次可能需要几分钟）"
-    Stop-ProjectNodeProcesses $projectDir
-    Push-Location $projectDir
-    try {
-        & $npm run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "构建失败，请查看上方输出。"
-        }
-    }
-    finally {
-        Pop-Location
+    else {
+        Write-Host "源码没有变化，跳过构建（复用已有生产构建）。" -ForegroundColor Yellow
     }
 }
 elseif (-not (Test-Path -LiteralPath (Join-Path $projectDir ".next\BUILD_ID"))) {
@@ -512,6 +623,7 @@ $config = [ordered]@{
     uninstallShortcutName = $UninstallShortcutName
     stopShortcutName      = $StopShortcutName
     startMenuFolder       = $StartMenuFolder
+    sourceFingerprint     = $sourceFingerprint
     installedAt           = (Get-Date).ToString("s")
 }
 $configJson = $config | ConvertTo-Json

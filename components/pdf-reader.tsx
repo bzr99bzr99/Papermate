@@ -2201,6 +2201,9 @@ export function PdfReader({
     scrollLeft: number;
     scrollTop: number;
   } | null>(null);
+  // 空格按住时的临时平移（松开即恢复）；panClickSuppressRef 抑制拖动后紧跟的 click。
+  const spacePanRef = useRef(false);
+  const panClickSuppressRef = useRef(false);
   const selectionRef = useRef<{
     pointerId: number;
     stack: HTMLElement;
@@ -2380,6 +2383,56 @@ export function PdfReader({
     window.getSelection()?.removeAllRanges();
     clearCurrentSelectionHighlights(readerRef.current);
   }, [panMode]);
+
+  // 空格 + 左键拖动：临时平移阅读器（不改变工具栏拖动模式开关）。
+  useEffect(() => {
+    const isEditableTarget = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return false;
+      return (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      );
+    };
+    const releaseSpacePan = () => {
+      if (!spacePanRef.current) return;
+      spacePanRef.current = false;
+      const reader = readerRef.current;
+      if (reader) {
+        reader.style.cursor = "";
+        reader.classList.remove("space-pan");
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || event.repeat || spacePanRef.current) return;
+      // 输入框内不劫持空格（正常输入空格）；焦点在按钮上时 preventDefault 会
+      // 同时阻止按钮的空格激活，保证「空格+左键」随时可用。
+      if (isEditableTarget(event)) return;
+      event.preventDefault();
+      spacePanRef.current = true;
+      const reader = readerRef.current;
+      if (reader) {
+        reader.style.cursor = "grab";
+        reader.classList.add("space-pan");
+      }
+      window.getSelection()?.removeAllRanges();
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") return;
+      releaseSpacePan();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", releaseSpacePan);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", releaseSpacePan);
+      releaseSpacePan();
+    };
+  }, []);
 
   useEffect(() => {
     setPageNumber(activeAnchor?.page ?? 1);
@@ -2716,7 +2769,7 @@ export function PdfReader({
 
   function startPan(event: ReactPointerEvent<HTMLElement>) {
     closeHighlightPopover();
-    if (!panMode || !readerRef.current) return;
+    if (!readerRef.current) return;
     const target = event.target;
     if (
       target instanceof Element &&
@@ -2733,7 +2786,10 @@ export function PdfReader({
       scrollLeft: reader.scrollLeft,
       scrollTop: reader.scrollTop,
     };
+    // 抑制拖动结束后紧跟的 click（空间平移/拖动模式下点击不应触发阅读器行为）。
+    panClickSuppressRef.current = true;
     setPanActive(true);
+    if (spacePanRef.current) reader.style.cursor = "grabbing";
     reader.setPointerCapture?.(event.pointerId);
   }
 
@@ -2751,11 +2807,13 @@ export function PdfReader({
     panRef.current = null;
     setPanActive(false);
     readerRef.current?.releasePointerCapture?.(event.pointerId);
+    if (spacePanRef.current && readerRef.current) readerRef.current.style.cursor = "grab";
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLElement>) {
     pinHandledOnPointerUpRef.current = false;
-    if (panMode) {
+    panClickSuppressRef.current = false;
+    if (panMode || spacePanRef.current) {
       startPan(event);
       return;
     }
@@ -2800,7 +2858,7 @@ export function PdfReader({
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLElement>) {
-    if (panMode) {
+    if (panRef.current) {
       movePan(event);
       return;
     }
@@ -2867,7 +2925,7 @@ export function PdfReader({
   }
 
   function handlePointerUp(event: ReactPointerEvent<HTMLElement>) {
-    if (panMode) {
+    if (panRef.current) {
       endPan(event);
       return;
     }
@@ -2945,7 +3003,7 @@ export function PdfReader({
   }
 
   function handlePointerCancel(event: ReactPointerEvent<HTMLElement>) {
-    if (panMode) {
+    if (panRef.current) {
       endPan(event);
       return;
     }
@@ -2966,6 +3024,11 @@ export function PdfReader({
   }
 
   function handleReaderClick(event: ReactPointerEvent<HTMLElement>) {
+    // 拖动平移（含空格临时平移）结束后紧跟的 click 一律忽略。
+    if (panClickSuppressRef.current) {
+      panClickSuppressRef.current = false;
+      return;
+    }
     if (
       panMode ||
       !readerRef.current ||

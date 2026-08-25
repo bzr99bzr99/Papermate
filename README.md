@@ -72,7 +72,7 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 ### Windows One-Click Install / Update / Uninstall
 
 - Fresh install: choose an install location; the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
-- Update: running `一键安装.bat` again detects the installed version and overwrites it in place while preserving the `data` folder.
+- Update: running `一键安装.bat` again detects the installed version and updates it incrementally (skipping copy and rebuild when the source is unchanged) while preserving the `data` folder.
 - Uninstall: available from the Start menu, install directory, or Windows Settings; the `data` directory is preserved by default.
 
 ## Requirements
@@ -94,7 +94,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 ## Windows One-Click Install
 
 - **Fresh install (no existing version)** - Double-click `一键安装.bat`, choose an install location, and the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
-- **Overwrite install (existing version detected)** - Double-click `一键安装.bat` again; once an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, it directly overwrites with the new version while preserving the `data` folder, without asking for a location again. No separate upgrade script is needed.
+- **Overwrite install (existing version detected)** - Double-click `一键安装.bat` again; once an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, it directly overwrites with the new version while preserving the `data` folder, without asking for a location again. No separate upgrade script is needed; updates are incremental and skip copying/rebuilding when the source is unchanged.
 - Uninstall is available from the Start menu, the install directory, or Windows Settings. See [INSTALL.md](INSTALL.md) and [安装说明.md](安装说明.md) for details.
 
 ## Usage

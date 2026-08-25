@@ -2,6 +2,13 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [3.2.0] - 2026-08-16
+
+### Changed
+
+- One-click install/update is now incremental: the installer computes a SHA-256 source fingerprint (path + size + mtime, excluding build-irrelevant files); when the source is unchanged it skips copying and rebuilding, and robocopy only copies changed files, making updates faster.
+- Operation logic improvements and bug fixes.
+
 ## [3.1.0] - 2026-08-16
 
 ### Added

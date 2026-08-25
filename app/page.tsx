@@ -541,6 +541,8 @@ export default function Home() {
   rightViewRef.current = rightView;
   const taskPaperRef = useRef<Record<string, string>>({});
   const [contextMode, setContextMode] = useState(false);
+  // 翻译模式：开启后划选原文立即翻译，并保持按钮选中状态。
+  const [translateMode, setTranslateMode] = useState(false);
   const [pendingColor, setPendingColor] = useState<HighlightColor>(HIGHLIGHT_COLORS[0]);
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
   const [backfillingId, setBackfillingId] = useState<string>();
@@ -1031,8 +1033,9 @@ export default function Home() {
     if (isCompact || isMobile) return;
     event.preventDefault();
     const startX = event.clientX;
-    const startLeft = leftWidth;
-    const startRight = rightWidth;
+    // 折叠的侧边栏按 0 宽参与拖动：拖动另一边时折叠栏不得“复活”遮挡内容。
+    const startLeft = leftCollapsed ? 0 : leftWidth;
+    const startRight = rightCollapsed ? 0 : rightWidth;
     // 拖动期间直接改 grid 的样式（CSS 变量驱动网格列宽与拖拽手柄位置），
     // 不触发 React 渲染，避免阅读器逐帧重排与逐帧重绘 PDF；松手时一次性提交。
     // 同时通过 body 类标记“正在调整布局”，阅读器在此期间冻结页面宽度，
@@ -1309,6 +1312,10 @@ export default function Home() {
     setActiveConversationId(existing?.id);
     setPendingColor(defaultHighlightColor(workspace.conversations.length));
     openView("chat");
+    if (translateMode && !additive) {
+      // 翻译模式已开启：完成一次新划选后立即翻译，并保持模式选中。
+      void sendQuestion("translate", undefined, nextAnchors);
+    }
     if (additive && nextAnchors.length === MAX_SELECTION_FRAGMENTS) {
       setNotice(`一次最多组合 ${MAX_SELECTION_FRAGMENTS} 个片段。`);
     }
@@ -1484,7 +1491,7 @@ export default function Home() {
     return run();
   }
 
-  async function sendQuestion(kind: PromptKind, forcedQuestion?: string) {
+  async function sendQuestion(kind: PromptKind, forcedQuestion?: string, overrideAnchors?: TextAnchor[]) {
     if (!paper) return;
     const activeApiKey = currentModelApiKey();
     const providerLabel = currentModelLabel();
@@ -1503,7 +1510,11 @@ export default function Home() {
       return;
     }
     const finalQuestion = requestedQuestion || (kind === "free" ? "请解释这段内容。" : promptLabels[kind]);
-    if (!activeAnchors.length && kind !== "free") {
+    // 本次提问使用的选区：自动翻译等场景传入刚划选完成的锚点，其余沿用当前选区。
+    const selectionAnchors = overrideAnchors ?? activeAnchors;
+    const selectionGroup = selectionGroupForAnchors(paper.id, selectionAnchors);
+    const selectionAnchor = selectionAnchors[0];
+    if (!selectionAnchors.length && kind !== "free") {
       setNotice("先在原版页面上划选一段原文。" );
       return;
     }
@@ -1514,7 +1525,7 @@ export default function Home() {
     const baseConversations = workspaceRef.current.conversations;
     // 同一段原文 + 相同的提问内容 → 复用已有会话（覆盖旧记录，避免重复）。
     // 匹配顺序：选区/锚点身份 → 内容+问题 → 当前活动会话。
-    const currentQuote = activeAnchors[0] ? normalizedQuote(activeAnchors[0].quote) : "";
+    const currentQuote = selectionAnchors[0] ? normalizedQuote(selectionAnchors[0].quote) : "";
     const fallbackByContent = !currentQuote
       ? undefined
       : baseConversations.find((candidate) => {
@@ -1533,12 +1544,12 @@ export default function Home() {
         ? baseConversations.find(
             (conversation) =>
               conversation.scope === "context" &&
-              conversationMatchesSelection(conversation, activeSelection, activeAnchor),
+              conversationMatchesSelection(conversation, selectionGroup, selectionAnchor),
           )
         : baseConversations.find(
             (conversation) =>
               isNormalScope(conversation) &&
-              conversationMatchesSelection(conversation, activeSelection, activeAnchor),
+              conversationMatchesSelection(conversation, selectionGroup, selectionAnchor),
           )) ??
       fallbackByContent ??
       (isContextRequest
@@ -1549,20 +1560,20 @@ export default function Home() {
     const conversation = baseConversation ?? {
       id: uid(),
       paperId: paper.id,
-      anchor: activeAnchor,
-      selection: activeSelection,
+      anchor: selectionAnchor,
+      selection: selectionGroup,
       scope: isContextRequest ? "context" : "normal",
       color: pendingColor ?? defaultHighlightColor(baseConversations.length),
       title: isContextRequest
-        ? activeSelection
-          ? activeSelection.anchors.length > 1
-            ? `全文上下文 · ${activeSelection.anchors.length} 个片段`
-            : `全文上下文 · ${activeSelection.anchors[0].section ?? `第 ${activeSelection.anchors[0].page} 页`}`
+        ? selectionGroup
+          ? selectionGroup.anchors.length > 1
+            ? `全文上下文 · ${selectionGroup.anchors.length} 个片段`
+            : `全文上下文 · ${selectionGroup.anchors[0].section ?? `第 ${selectionGroup.anchors[0].page} 页`}`
           : "全文上下文"
-        : activeSelection
-          ? activeSelection.anchors.length > 1
-            ? `${activeSelection.anchors.length} 个片段问答`
-            : `${activeSelection.anchors[0].section ?? `第 ${activeSelection.anchors[0].page} 页`}选段`
+        : selectionGroup
+          ? selectionGroup.anchors.length > 1
+            ? `${selectionGroup.anchors.length} 个片段问答`
+            : `${selectionGroup.anchors[0].section ?? `第 ${selectionGroup.anchors[0].page} 页`}选段`
           : "全文问答",
       turns: [],
       updatedAt: now,
@@ -1580,8 +1591,8 @@ export default function Home() {
       mode,
       provider: modelProvider,
       kind,
-      anchor: activeAnchor,
-      selection: activeSelection,
+      anchor: selectionAnchor,
+      selection: selectionGroup,
     };
     const assistantTurn: ChatTurn = {
       id: uid(),
@@ -1591,8 +1602,8 @@ export default function Home() {
       mode,
       provider: modelProvider,
       kind,
-      anchor: activeAnchor,
-      selection: activeSelection,
+      anchor: selectionAnchor,
+      selection: selectionGroup,
     };
     // 同内容快捷提问去重：会话中已存在"相同提问 + 相同原文"的记录时，
     // 在原来的位置覆盖旧记录（用户问题与其后回答成对替换），不追加重复。
@@ -1616,8 +1627,8 @@ export default function Home() {
         : [...conversation.turns, userTurn, assistantTurn];
     let currentConversation = {
       ...conversation,
-      anchor: activeAnchor,
-      selection: activeSelection,
+      anchor: selectionAnchor,
+      selection: selectionGroup,
       turns: nextTurns,
       updatedAt: now,
     };
@@ -1628,7 +1639,7 @@ export default function Home() {
     setPendingColor(defaultHighlightColor(baseConversations.length + 1));
     setQuestion("");
     beginChat(currentConversation.id);
-    const selectedContext = buildContext(paper.pages, activeAnchors);
+    const selectedContext = buildContext(paper.pages, selectionAnchors);
     let historyMessages: Array<{ role: "user" | "assistant"; content: string }>;
     let requestContext: string;
     if (kind === "context") {
@@ -1664,8 +1675,8 @@ export default function Home() {
       // 让小人结合对话内容聊天（翻译/问答场景）。
       const assistantReply =
         currentConversation.turns.find((turn) => turn.id === assistantTurn.id)?.content ?? "";
-      const quoteText = activeAnchors[0]?.quote?.trim()
-        ? `原文选段：${activeAnchors[0].quote.trim().slice(0, 200)}\n`
+      const quoteText = selectionAnchors[0]?.quote?.trim()
+        ? `原文选段：${selectionAnchors[0].quote.trim().slice(0, 200)}\n`
         : "";
       buddyEvent(
         kind === "translate" ? "translate" : kind === "context" || kind === "concept" ? "explain" : "ask",
@@ -2273,6 +2284,8 @@ export default function Home() {
               onChangeColor={changeConversationColor}
               contextMode={contextMode}
               onToggleContext={() => setContextMode((current) => !current)}
+              translateMode={translateMode}
+              onTranslateModeChange={setTranslateMode}
               onPrompt={(kind) => void sendQuestion(kind)}
               onSelectConversation={selectConversation}
               onDeleteTurn={deleteConversationTurn}
@@ -2625,7 +2638,7 @@ function ModelSwitch({ models, modelId, onChange, mode, onModeChange }: {
   );
 }
 
-function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, onPrompt, onSelectConversation, onDeleteTurn, provider, mode, modelLabel }: {
+function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, translateMode, onTranslateModeChange, onPrompt, onSelectConversation, onDeleteTurn, provider, mode, modelLabel }: {
   anchors?: TextAnchor[];
   selectionGroup?: SelectionGroup;
   conversation?: Conversation;
@@ -2639,6 +2652,8 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   onChangeColor: (conversation: Conversation, color: HighlightColor) => void;
   contextMode: boolean;
   onToggleContext: () => void;
+  translateMode: boolean;
+  onTranslateModeChange: (value: boolean) => void;
   onPrompt: (kind: PromptKind) => void;
   onSelectConversation: (conversation: Conversation) => void;
   onDeleteTurn: (conversation: Conversation, turnId: string) => void;
@@ -2807,15 +2822,6 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
         ))}
       </div>
     </div>
-    <div className="quick-prompts">
-      <button disabled={generating} onClick={() => onPrompt("translate")}>翻译</button>
-      <button
-        disabled={generating}
-        className={contextMode ? "active" : ""}
-        aria-pressed={contextMode}
-        onClick={onToggleContext}
-      >结合上下文解释</button>
-    </div>
     <div className="chat-history" ref={historyRef} aria-live="polite">
       {conversation?.turns.length ? conversation.turns.map((turn) => (
         <div key={turn.id} data-turn-id={turn.id} className={`chat-turn ${turn.role}`}>
@@ -2837,8 +2843,28 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
         </div>
       )) : <div className="chat-empty"><CircleHelp size={22} /><p>选中一句话，或提出关于整篇论文的问题。</p></div>}
     </div>
+    <div className="quick-prompts">
+      <button
+        disabled={generating}
+        className={translateMode ? "active" : ""}
+        aria-pressed={translateMode}
+        title="开启后划选原文自动翻译"
+        onClick={() => {
+          const next = !translateMode;
+          onTranslateModeChange(next);
+          // 已有选区时点击翻译：立即翻译，并保持翻译模式选中。
+          if (next && selectionAnchors.length) onPrompt("translate");
+        }}
+      >翻译</button>
+      <button
+        disabled={generating}
+        className={contextMode ? "active" : ""}
+        aria-pressed={contextMode}
+        onClick={onToggleContext}
+      >结合上下文解释</button>
+    </div>
     <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onPrompt(contextMode ? "context" : "free"); } }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
-    <p className="input-hint">{contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "Enter 发送 · Shift + Enter 换行 · 回答优先依据论文原文"}</p>
+    <p className="input-hint">{translateMode ? "翻译模式已开启 · 划选原文自动翻译（再次点击「翻译」关闭）" : contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "Enter 发送 · Shift + Enter 换行 · 回答优先依据论文原文"}</p>
   </div>;
 }
 
