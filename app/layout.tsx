@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "katex/dist/katex.min.css";
 import "./globals.css";
+import "./visual-refresh.css";
 
 export const metadata: Metadata = {
   title: "PaperMate · 论文阅读辅助助手",

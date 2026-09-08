@@ -99,6 +99,7 @@ export interface ParsedPage {
 }
 
 export interface Paper {
+  lastReadAt?: string;
   id: string;
   title: string;
   fileName: string;
@@ -119,6 +120,7 @@ export interface Paper {
 }
 
 export interface PaperMeta {
+  lastReadAt?: string;
   id: string;
   title: string;
   fileName: string;

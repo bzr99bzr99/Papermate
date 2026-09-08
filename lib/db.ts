@@ -87,6 +87,10 @@ export async function setPaperPinned(id: string, pinned: boolean): Promise<void>
     body: JSON.stringify({ pinned }),
   });
 }
+export async function markPaperRead(id: string): Promise<string> {
+  const result = await requestJson<{ lastReadAt: string }>(`/api/storage/papers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ markRead: true }) });
+  return result.lastReadAt;
+}
 
 export async function reorderPapers(ids: string[]): Promise<void> {
   await requestJson<{ ok: true }>("/api/storage/papers/order", {

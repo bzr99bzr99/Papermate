@@ -62,6 +62,7 @@ import {
   repairPaperOriginalMetadata,
 } from "@/components/pdf-reader";
 import BuddySystem from "@/components/buddy-system";
+import { sortByRecentReading } from "@/lib/library-order";
 import {
   deletePaper,
   deleteCustomModel,
@@ -75,6 +76,7 @@ import {
   importBackup,
   listModels,
   listPapers,
+  markPaperRead,
   lookupPaperMetadata,
   reorderPapers,
   saveApiKeys,
@@ -258,6 +260,7 @@ function paperToMeta(paper: Paper): PaperMeta {
     pinned: paper.pinned,
     createdAt: paper.createdAt,
     updatedAt: paper.updatedAt,
+    lastReadAt: paper.lastReadAt,
     pageCount: paper.pageCount,
     originalReady: paper.originalReady,
   };
@@ -585,6 +588,15 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKey);
   }, [deleteConfirm]);
   const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryOrder, setLibraryOrder] = useState<"recent" | "manual">("recent");
+  useEffect(() => {
+    const id = paper?.id;
+    if (!id) return;
+    void markPaperRead(id).then((lastReadAt) => {
+      setPapers((current) => current.map((item) => item.id === id ? { ...item, lastReadAt } : item));
+      setPaper((current) => current?.id === id ? { ...current, lastReadAt } : current);
+    }).catch(() => setNotice("阅读时间未保存，可重新打开论文重试。"));
+  }, [paper?.id]);
   const [dragPaperId, setDragPaperId] = useState<string>();
   const [dragOverId, setDragOverId] = useState<string>();
   const [editingNotePaperId, setEditingNotePaperId] = useState<string>();
@@ -682,8 +694,9 @@ export default function Home() {
   );
   const visiblePapers = useMemo(() => {
     const query = libraryQuery.trim().toLocaleLowerCase();
-    if (!query) return papers;
-    return papers.filter((item) =>
+    const ordered = libraryOrder === "recent" ? sortByRecentReading(papers) : papers;
+    if (!query) return ordered;
+    return ordered.filter((item) =>
       [
         item.title,
         item.fileName,
@@ -696,7 +709,7 @@ export default function Home() {
         .toLocaleLowerCase()
         .includes(query),
     );
-  }, [libraryQuery, papers]);
+  }, [libraryQuery, papers, libraryOrder]);
 
   const writeBackupNow = useCallback(async () => {
     await saveWorkspaceDebouncer.flush();
@@ -1997,6 +2010,7 @@ export default function Home() {
           <span className="eyebrow"><Sparkles size={14} /> LOCAL-FIRST PAPER COMPANION</span>
           <h1>把每一段读不懂的论文，<br />变成自己的理解。</h1>
           <p>拖入可检索 PDF，划选原文即可翻译、追问与深度解释；脑图、笔记和写作策略始终保留在你的本机。</p>
+          <div className="reading-promise"><span><HardDrive size={13} /> 本地珍藏</span><span><Sparkles size={13} /> 灵感共读</span><span><Palette size={13} /> 20 种阅读心境</span></div>
           <div
             className={`drop-zone ${uploadState === "loading" ? "is-loading" : ""}`}
             onDragOver={(event) => event.preventDefault()}
@@ -2016,7 +2030,11 @@ export default function Home() {
         <section className="library-section">
           <div className="section-label">
             <FolderOpen size={17} /> 本地论文库 <span>{visiblePapers.length}</span>
-            <small className="library-order-hint">拖动卡片排序 · 图钉置顶</small>
+            <small className="library-order-hint">{libraryOrder === "recent" ? "最近阅读优先 · 图钉置顶" : "拖动卡片排序 · 图钉置顶"}</small>
+            <select className="library-order-select" aria-label="论文库排序方式" value={libraryOrder} onChange={(event) => setLibraryOrder(event.target.value as "recent" | "manual")}>
+              <option value="recent">最近阅读</option>
+              <option value="manual">手动排序</option>
+            </select>
           </div>
           <div className="library-search">
             <Search size={15} />
@@ -2049,9 +2067,9 @@ export default function Home() {
                 <article
                   className={`paper-card${backfillingId === item.id ? " is-backfilling" : ""}${dragPaperId === item.id ? " is-dragging" : ""}${dragOverId === item.id ? " is-drag-over" : ""}`}
                   key={item.id}
-                  draggable={!libraryQuery.trim() && papers.length > 1}
+                  draggable={libraryOrder === "manual" && !libraryQuery.trim() && papers.length > 1}
                   onDragStart={(event) => {
-                    if (libraryQuery.trim() || papers.length <= 1) return;
+                    if (libraryOrder !== "manual" || libraryQuery.trim() || papers.length <= 1) return;
                     setDragPaperId(item.id);
                     event.dataTransfer.effectAllowed = "move";
                     event.dataTransfer.setData("text/plain", item.id);
@@ -2083,7 +2101,7 @@ export default function Home() {
                   <button className="paper-card-open" onClick={() => void openPaper(item)}>
                     <span className="paper-icon"><FileText size={22} /></span>
                     <strong>{item.title}</strong>
-                    <small>{item.pageCount} 页 · {readableDate(item.updatedAt)} 保存</small>
+                    <small>{item.pageCount} 页 · {item.lastReadAt ? `${readableDateTime(item.lastReadAt)} 阅读` : `${readableDate(item.createdAt)} 加入 · 未读`}</small>
                     <ChevronRight size={17} />
                   </button>
                   {backfillingId === item.id ? (
@@ -2467,6 +2485,7 @@ function SidebarQuote() {
 
 function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: ThemeId) => void }) {
   const [open, setOpen] = useState(false);
+  const [collection, setCollection] = useState<"reading" | "art">("reading");
   const rootRef = useRef<HTMLDivElement>(null);
   const active = THEMES.find((item) => item.id === theme) ?? THEMES[0];
 
@@ -2480,12 +2499,17 @@ function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: 
   }, [open]);
 
   return (
-    <div className="theme-switcher" ref={rootRef}>
+    <div className="theme-switcher" ref={rootRef} onKeyDown={(event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        rootRef.current?.querySelector<HTMLButtonElement>(".theme-trigger")?.focus();
+      }
+    }}>
       <button
         type="button"
         className="theme-trigger"
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-label="切换阅读主题"
         onClick={() => setOpen((value) => !value)}
       >
@@ -2495,20 +2519,26 @@ function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: 
         <ChevronDown size={14} className="theme-trigger-chevron" />
       </button>
       {open && (
-        <div className="theme-menu" role="menu" aria-label="阅读主题">
-          {THEMES.map((item) => (
+        <div className="theme-menu" role="dialog" aria-label="阅读主题画廊">
+          <div className="theme-gallery-heading"><span>为阅读，换一种心境</span><small>APPEARANCE STUDIO · 20 款皮肤</small></div>
+          <div className="theme-collections" aria-label="皮肤分类">
+            <button type="button" autoFocus aria-pressed={collection === "reading"} onClick={() => setCollection("reading")}>专注阅读 <span>柔和 · 清晰</span></button>
+            <button type="button" aria-pressed={collection === "art"} onClick={() => setCollection("art")}>氛围美学 <span>色彩 · 灵感</span></button>
+          </div>
+          <div className="theme-gallery-grid">
+          {THEMES.filter((item) => ["classic", "paper-white", "bean-green", "parchment", "dark", "mono", "morandi", "eink", "inkwash"].includes(item.id) === (collection === "reading")).map((item) => (
             <button
               key={item.id}
               type="button"
-              role="menuitemradio"
-              aria-checked={item.id === theme}
+              aria-pressed={item.id === theme}
               className={`theme-menu-item ${item.id === theme ? "active" : ""}`}
               onClick={() => {
                 onChange(item.id);
                 setOpen(false);
+                rootRef.current?.querySelector<HTMLButtonElement>(".theme-trigger")?.focus();
               }}
             >
-              <span className="theme-trigger-swatch" style={item.swatch} />
+              <span className="theme-preview" data-theme={item.id} aria-hidden="true"><i className="theme-preview-sidebar" /><i className="theme-preview-paper"><em /><em /><em /><em /></i><i className="theme-preview-chat"><em /><em /></i></span>
               <span>
                 <b>{item.name}</b>
                 <small>{item.description}</small>
@@ -2516,6 +2546,8 @@ function ThemeSwitcher({ theme, onChange }: { theme: ThemeId; onChange: (theme: 
               {item.id === theme && <Check size={14} className="theme-menu-check" />}
             </button>
           ))}
+          </div>
+          <p className="theme-gallery-footnote">即选即用 · 自动记住你的偏好</p>
         </div>
       )}
     </div>

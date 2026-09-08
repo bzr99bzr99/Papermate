@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { buddyScale, clampBuddyPosition, BUDDY_MIN_SCALE, BUDDY_MAX_SCALE, BUDDY_SIZE_STEP } from "@/lib/buddy-layout";
 
 /* ============================================================
    BuddySystem：博士科研小人陪读彩蛋
@@ -16,6 +17,7 @@ import {
      → 咖啡因战士（咖啡+闪电眼）→ 论文重构大师（红流苏学位帽
      +权杖+文献小山）→ 图灵飞升·赛博老博（格子衫+地中海+台式机
      +写实学位证弹窗）
+   - 控制栏：默认收起，点击小人展开、再次点击收起（外部点击/Esc 同样收起）
    - 话痨滑块：调节陪读说话概率与冷却
    - 挂机打盹/梦境/惊醒；里程碑横幅/粒子/震动/拍立得/证书
    - 浮层统一插槽：speech/横幅/拍立得/梦境同槽排开，永不重叠
@@ -30,6 +32,7 @@ const POS_KEY = "papermate-buddy-pos-v1";
 const WELCOME_KEY = "papermate-buddy-welcome-v1";
 const PERSONA_KEY = "papermate-buddy-persona-v1";
 const TALK_KEY = "papermate-buddy-talk-v1";
+const SIZE_KEY = "papermate-buddy-size-v1";
 
 const BUDDY_RECENT_LIMIT = 12;
 const DEFAULT_TALK = 55;
@@ -97,9 +100,9 @@ function DoctorBuddy({ level }: { level: number }) {
         </pattern>
         {/* 美化：袍子/帽子/皮肤渐变，增加体积感 */}
         <linearGradient id="doc-robe-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#5d7094" />
-          <stop offset=".55" stopColor="#4a5a78" />
-          <stop offset="1" stopColor="#3d4a6b" />
+          <stop offset="0" stopColor="var(--buddy-robe-light, #799b93)" />
+          <stop offset=".55" stopColor="var(--buddy-robe, #42675e)" />
+          <stop offset="1" stopColor="var(--buddy-robe-dark, #243e39)" />
         </linearGradient>
         <linearGradient id="doc-cap-grad" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#3a4152" />
@@ -111,6 +114,8 @@ function DoctorBuddy({ level }: { level: number }) {
           <stop offset="1" stopColor="#efb183" />
         </radialGradient>
       </defs>
+      <ellipse cx="50" cy="124" rx="29" ry="5" fill="var(--accent)" opacity=".12" />
+      <ellipse cx="50" cy="125" rx="19" ry="2.5" fill="var(--accent)" opacity=".12" />
       {/* 腿（袍/裤下） */}
       <g className="doc-leg doc-leg-l">
         <rect x="39" y="99" width="10" height="18" rx="3" fill="#2a2f3c" />
@@ -152,12 +157,12 @@ function DoctorBuddy({ level }: { level: number }) {
       )}
       {/* 手臂（袍袖圆润；L5 脱袍后为格子衫短袖，金线袖口仅 L0-L4） */}
       <g className="doc-arm doc-arm-l">
-        <rect x="24" y="56" width="11" height="30" rx="5.5" fill={props[5] ? "url(#doc-plaid)" : "#4a5a78"} stroke="#333f58" strokeWidth="1.2" />
+        <rect x="24" y="56" width="11" height="30" rx="5.5" fill={props[5] ? "url(#doc-plaid)" : "url(#doc-robe-grad)"} stroke="#333f58" strokeWidth="1.2" />
         <rect x="26" y="59" width="2.6" height="25" rx="1.3" fill="#5d7094" opacity=".7" />
         {!props[5] && <rect x="24.5" y="81" width="10" height="2.4" rx="1.2" fill="#cfa83e" />}
       </g>
       <g className="doc-arm doc-arm-r">
-        <rect x="65" y="56" width="11" height="30" rx="5.5" fill={props[5] ? "url(#doc-plaid)" : "#4a5a78"} stroke="#333f58" strokeWidth="1.2" />
+        <rect x="65" y="56" width="11" height="30" rx="5.5" fill={props[5] ? "url(#doc-plaid)" : "url(#doc-robe-grad)"} stroke="#333f58" strokeWidth="1.2" />
         <rect x="71.4" y="59" width="2.6" height="25" rx="1.3" fill="#5d7094" opacity=".7" />
         {!props[5] && <rect x="65.5" y="81" width="10" height="2.4" rx="1.2" fill="#cfa83e" />}
       </g>
@@ -177,7 +182,10 @@ function DoctorBuddy({ level }: { level: number }) {
             <path d="M35 22 Q36 12 50 12 Q64 12 65 22 L65 18 Q65 10 50 10 Q35 10 35 18 Z" fill="#5d4a33" opacity=".8" />
           </>
         )}
+        <circle cx="32.8" cy="34" r="3.2" fill="#efb183" />
+        <circle cx="67.2" cy="34" r="3.2" fill="#efb183" />
         <circle cx="50" cy="33" r="17" fill="url(#doc-skin-grad)" />
+        {!props[5] && <path d="M34 24 Q34 13 50 15 Q65 13 66 24 Q59 24 55 19 Q48 27 40 22 L36 27 Z" fill="#4a3a28" />}
         {/* 秃顶反光（L5 赛博老博） */}
         {props[5] && <path d="M44 19 Q50 16.8 56 19 Q50 21 44 19 Z" fill="#ffe9d2" opacity=".65" />}
         {/* 腮红 */}
@@ -487,6 +495,15 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
   const randomRateFor = (talk: number) => (talk / 100) * 0.6;
 
   /* 位置（仅拖拽） */
+  const [size, setSize] = useState(100);
+  useEffect(() => {
+    try { const saved = window.localStorage.getItem(SIZE_KEY); if (saved !== null) setSize(buddyScale(Number(saved))); } catch { /* Storage is optional. */ }
+  }, []);
+  const changeSize = (value: number) => {
+    const next = buddyScale(value);
+    setSize(next);
+    try { window.localStorage.setItem(SIZE_KEY, String(next)); } catch { /* Storage is optional. */ }
+  };
   const [pos, setPos] = useState<{ x: number; y: number }>(() => {
     if (typeof window === "undefined") return { x: 1280, y: 780 };
     return loadSavedPos() ?? { x: Math.max(20, window.innerWidth - 118), y: Math.max(78, window.innerHeight - 168) };
@@ -494,6 +511,12 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
   const [dragging, setDragging] = useState(false);
   const posRef = useRef(pos);
   posRef.current = pos;
+  useEffect(() => {
+    const fit = () => setPos((current) => clampBuddyPosition(current, size, { width: window.innerWidth, height: window.innerHeight }));
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [size]);
 
   /* 说话气泡：新内容直接覆盖旧内容（setSpeech 立即替换 + 重置计时器）；
      nonce 作为气泡 key，让每次新内容触发重新入场动画，切换清晰可见 */
@@ -512,6 +535,28 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
   const [persona, setPersona] = useState<BuddyPersonaId>("soft");
   const [personaMenuOpen, setPersonaMenuOpen] = useState(false);
   const [talkMenuOpen, setTalkMenuOpen] = useState(false);
+  /* 控制栏开关：默认收起，点击小人展开、再次点击收起 */
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const toggleControls = useCallback(() => setControlsOpen((open) => !open), []);
+  /* 控制栏收起时同步关掉它的两个面板，避免下次展开时残留 */
+  useEffect(() => {
+    if (!controlsOpen) {
+      setTalkMenuOpen(false);
+      setPersonaMenuOpen(false);
+    }
+  }, [controlsOpen]);
+  /* 点击小人/控制栏之外的区域也收起控制栏 */
+  useEffect(() => {
+    if (!controlsOpen) return;
+    const onPointerDownOutside = (event: PointerEvent) => {
+      const root = rootRef.current;
+      if (root && event.target instanceof Node && root.contains(event.target)) return;
+      setControlsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDownOutside, true);
+    return () => document.removeEventListener("pointerdown", onPointerDownOutside, true);
+  }, [controlsOpen]);
   const talkTier = (talk: number) =>
     talk <= 20 ? "安静陪读" : talk <= 45 ? "偶尔搭话" : talk <= 75 ? "活泼话痨" : "超话痨模式";
   useEffect(() => {
@@ -604,30 +649,41 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
   const lastActivityRef = useRef<number>(Date.now());
   const sleepStartRef = useRef<number>(0);
 
-  /* 拖拽 */
-  const dragRef = useRef<{ startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
+  /* 拖拽（与点击区分：位移超过 5px 才算拖拽，否则视为点击开关控制栏） */
+  const dragRef = useRef<{ startX: number; startY: number; offsetX: number; offsetY: number; pointerX: number; pointerY: number; moved: boolean } | null>(null);
   const onPointerDown = useCallback((event: React.PointerEvent) => {
     dragRef.current = {
       startX: posRef.current.x,
       startY: posRef.current.y,
       offsetX: event.clientX - posRef.current.x,
       offsetY: event.clientY - posRef.current.y,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      moved: false,
     };
-    setDragging(true);
     (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
     event.preventDefault();
   }, []);
   const onPointerMove = useCallback((event: React.PointerEvent) => {
     const drag = dragRef.current;
     if (!drag) return;
-    setPos({
-      x: Math.min(window.innerWidth - 60, Math.max(0, event.clientX - drag.offsetX)),
-      y: Math.min(window.innerHeight - 70, Math.max(0, event.clientY - drag.offsetY)),
-    });
-  }, []);
+    if (!drag.moved) {
+      if (Math.abs(event.clientX - drag.pointerX) + Math.abs(event.clientY - drag.pointerY) < 5) return;
+      drag.moved = true;
+      setDragging(true);
+    }
+    setPos(clampBuddyPosition({ x: event.clientX - drag.offsetX, y: event.clientY - drag.offsetY }, size, { width: window.innerWidth, height: window.innerHeight }));
+  }, [size]);
   const onPointerUp = useCallback(() => {
+    const drag = dragRef.current;
     dragRef.current = null;
     setDragging(false);
+    if (!drag) return;
+    if (!drag.moved) {
+      /* 原地点击：切换控制栏显隐 */
+      toggleControls();
+      return;
+    }
     try {
       window.localStorage.setItem(
         POS_KEY,
@@ -636,6 +692,10 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
     } catch {
       /* 忽略 */
     }
+  }, [toggleControls]);
+  const onPointerCancel = useCallback(() => {
+    dragRef.current = null;
+    setDragging(false);
   }, []);
 
   /* 挂机检测 */
@@ -810,9 +870,10 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
 
   return (
     <div
+      ref={rootRef}
       className={`buddy-root ${sleeping ? "is-asleep" : ""} ${buddyState === "waking" ? "is-waking" : ""} ${dragging ? "is-dragging" : ""} ${bubbleRight ? "bubble-right" : "bubble-left"}`}
-      style={{ left: pos.x, top: pos.y }}
-      aria-hidden
+      style={{ left: pos.x, top: pos.y, "--buddy-size": size / 100, "--buddy-menu-x": `${Math.max(12, Math.min(pos.x, typeof window !== "undefined" ? window.innerWidth - 236 : pos.x))}px`, "--buddy-menu-y": `${Math.max(12, pos.y - 210)}px` } as React.CSSProperties}
+      onKeyDown={(event) => { if (event.key === "Escape") { setTalkMenuOpen(false); setPersonaMenuOpen(false); setControlsOpen(false); } }}
     >
       {/* 统一浮层插槽：Z/惊醒叹号/说话气泡/横幅/拍立得/梦境同槽排开，永不重叠；
          人格/话痨菜单打开时隐藏浮层，避免与菜单交叠 */}
@@ -865,21 +926,40 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
           )}
         </div>
       )}
-      {/* 博士小人本体（可拖拽） */}
+      {/* 博士小人本体（可拖拽；原地点击 = 开/关控制栏） */}
       <div
         className="buddy-figure"
+        role="button"
+        tabIndex={0}
+        aria-label={controlsOpen ? "收起陪读小人控制栏" : "打开陪读小人控制栏"}
+        aria-expanded={controlsOpen}
+        title={controlsOpen ? "点击收起控制栏（按住可拖动）" : "点击打开控制栏（按住可拖动）"}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleControls();
+          }
+        }}
       >
+        <span className="buddy-orbit" aria-hidden="true"><i /><i /><i /></span>
         <div className={`doctor-body ${sleeping ? "is-napping" : ""}`}>
           <DoctorBuddy level={level} />
         </div>
+        <span className={`buddy-toggle-hint ${controlsOpen ? "is-open" : ""}`} aria-hidden="true">
+          {controlsOpen ? "×" : "⋯"}
+        </span>
+      </div>
+      {controlsOpen && (
+      <div className="buddy-controls" role="group" aria-label="陪读小人控制">
         {/* 话痨程度按钮（点击展开面板） */}
         <button
           className={`buddy-talk-btn ${talkMenuOpen ? "is-open" : ""}`}
           aria-label="话痨程度"
+          aria-expanded={talkMenuOpen}
           title="话痨程度"
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -916,6 +996,7 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
         <button
           className={`buddy-gear ${personaMenuOpen ? "is-open" : ""}`}
           aria-label="切换陪读小人人格"
+          aria-expanded={personaMenuOpen}
           title="切换人格"
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -932,6 +1013,9 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
             <circle cx="8" cy="7.5" r="2.2" fill="var(--panel)" stroke="currentColor" strokeWidth="1.4" />
           </svg>
         </button>
+        <button type="button" className="buddy-size-button" aria-label="缩小陪读小人" title="缩小" disabled={size <= BUDDY_MIN_SCALE} onClick={() => changeSize(size - BUDDY_SIZE_STEP)}>−</button>
+        <button type="button" className="buddy-size-reset" aria-label="恢复陪读小人默认大小" title="恢复默认大小" onClick={() => changeSize(100)}>{size}%</button>
+        <button type="button" className="buddy-size-button" aria-label="放大陪读小人" title="放大" disabled={size >= BUDDY_MAX_SCALE} onClick={() => changeSize(size + BUDDY_SIZE_STEP)}>+</button>
         {personaMenuOpen && (
           <div className="buddy-persona-menu" role="menu" aria-label="陪读人格">
             {PERSONA_OPTIONS.map((option) => (
@@ -953,6 +1037,7 @@ const BuddySystem = forwardRef<BuddyHandle, { noteCount: number }>(function Budd
           </div>
         )}
       </div>
+      )}
       {/* 火花粒子（20 条） */}
       {sparks.map((s) => (
         <span key={s.id} className="buddy-spark" style={{ left: s.x, top: s.y }} />

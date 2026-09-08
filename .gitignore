@@ -15,6 +15,9 @@ coverage/
 .dev-server.*.log
 papermate-backup-*.json
 
+# 代理运行时记忆（本机私有，不提交）
+.mnemon/
+
 !.env.example
 npm-debug.log*
 yarn-debug.log*

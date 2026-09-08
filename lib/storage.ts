@@ -15,6 +15,7 @@ import type { PaperMeta, PaperWorkspace } from "./types";
 const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
 
 interface PaperRow {
+  last_read_at: string | null;
   id: string;
   title: string;
   file_name: string;
@@ -43,6 +44,7 @@ interface SettingsRow {
 }
 
 export interface PaperMateStorage {
+  markPaperRead(id: string): string;
   listPaperMetas(): PaperMeta[];
   getPaper(id: string): BackupPaper | undefined;
   savePaper(paper: BackupPaper): void;
@@ -116,6 +118,7 @@ function paperToRow(paper: BackupPaper): {
       paper.pinned ? 1 : 0,
       buffer,
       parsed,
+      paper.lastReadAt && Number.isFinite(Date.parse(paper.lastReadAt)) ? new Date(paper.lastReadAt).toISOString() : null,
     ],
   };
 }
@@ -137,6 +140,7 @@ function rowToBackupPaper(row: PaperRow): BackupPaper {
     note: row.note ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastReadAt: row.last_read_at ?? undefined,
     pages: parsed.pages ?? [],
     pageCount: row.page_count,
     outline: parsed.outline,
@@ -210,6 +214,9 @@ export function openStorage(options: {
   if (!existingPaperColumns.has("pinned")) {
     db.exec("ALTER TABLE papers ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
   }
+  if (!existingPaperColumns.has("last_read_at")) {
+    db.exec("ALTER TABLE papers ADD COLUMN last_read_at TEXT");
+  }
   if (!existingPaperColumns.has("sort_order")) {
     db.exec("ALTER TABLE papers ADD COLUMN sort_order REAL NOT NULL DEFAULT 0");
   }
@@ -230,8 +237,8 @@ export function openStorage(options: {
   const insertPaperStatement = db.prepare(`
     INSERT INTO papers (
       id, title, file_name, source_hash, keywords, journal_name, impact_factor,
-      note, created_at, updated_at, page_count, original_ready, pinned, pdf, parsed_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      note, created_at, updated_at, page_count, original_ready, pinned, pdf, parsed_json, last_read_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       file_name = excluded.file_name,
@@ -246,7 +253,8 @@ export function openStorage(options: {
       original_ready = excluded.original_ready,
       pinned = excluded.pinned,
       pdf = excluded.pdf,
-      parsed_json = excluded.parsed_json
+      parsed_json = excluded.parsed_json,
+      last_read_at = NULLIF(MAX(COALESCE(papers.last_read_at, ''), COALESCE(excluded.last_read_at, '')), '')
   `);
   const selectPaperById = db.prepare("SELECT * FROM papers WHERE id = ?");
   const selectPaperByHash = db.prepare("SELECT * FROM papers WHERE source_hash = ?");
@@ -300,7 +308,7 @@ export function openStorage(options: {
   return {
     listPaperMetas() {
       const rows = db
-        .prepare("SELECT id, title, file_name, source_hash, keywords, journal_name, impact_factor, note, created_at, updated_at, page_count, original_ready, pinned FROM papers ORDER BY pinned DESC, sort_order ASC, updated_at DESC")
+        .prepare("SELECT id, title, file_name, source_hash, keywords, journal_name, impact_factor, note, created_at, updated_at, last_read_at, page_count, original_ready, pinned FROM papers ORDER BY pinned DESC, sort_order ASC, updated_at DESC")
         .all() as Array<Omit<PaperRow, "pdf" | "parsed_json">>;
       return rows.map((row) => ({
         id: row.id,
@@ -313,6 +321,7 @@ export function openStorage(options: {
         note: row.note ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        lastReadAt: row.last_read_at ?? undefined,
         pageCount: row.page_count,
         originalReady: Boolean(row.original_ready),
         pinned: Boolean(row.pinned),
@@ -346,6 +355,12 @@ export function openStorage(options: {
       return undefined;
     },
 
+    markPaperRead(id) {
+      const readAt = new Date().toISOString();
+      const result = db.prepare("UPDATE papers SET last_read_at = ? WHERE id = ?").run(readAt, id);
+      if (!result.changes) throw new Error("Paper not found");
+      return readAt;
+    },
     updatePaperNote(id, note) {
       updatePaperNote.run(note, id);
     },

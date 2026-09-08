@@ -2,6 +2,24 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [3.6.0] - 2026-08-16
+
+### Added
+
+- Visual refresh stylesheet (`app/visual-refresh.css`, imported by `app/layout.tsx`) that unifies theme accents and companion styling on top of the per-theme rules in `globals.css`.
+- Paper library sorting by recent reading: papers are ordered by pinned state, then last-read time, then creation time (`lib/library-order.ts`); last-read timestamps are tracked through storage and the paper API.
+- Companion size controls: the reading companion can be scaled from 40% to 180% with dedicated buttons, and the choice is persisted locally (`lib/buddy-layout.ts`).
+- `scripts/sync-prompt-defaults.mjs` keeps the editable `public/prompts.txt` and the bundled fallback prompts in sync.
+
+### Changed
+
+- Prompts optimized (task prompts and companion personas).
+- Application icons regenerated.
+
+### Fixed
+
+- Various bug fixes and code cleanups.
+
 ## [3.3.0] - 2026-08-16
 
 ### Added

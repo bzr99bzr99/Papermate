@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
-const sizes = [16, 32, 48, 64, 128, 256];
+const sizes = [16, 24, 32, 48, 64, 128, 256];
+// Editable vector master; PNG and multi-resolution ICO are derived assets.
+await sharp(join(rootDir, "scripts", "papermate-icon.svg")).resize(1024, 1024).png().toFile(join(rootDir, "papermate.png"));
 const icons = [
   {
     sourcePath: join(rootDir, "papermate.png"),
