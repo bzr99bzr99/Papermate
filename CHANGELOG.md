@@ -2,6 +2,13 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [4.0.1] - 2026-08-16
+
+### Fixed
+
+- Prompt caching could return the wrong file's contents. The caches behind `public/prompts.txt` (task, system and web-search prompts) and `public/buddy-personas.txt` were keyed only on the file modification time, so two different files written within the same millisecond collided and the second read returned the first file's parsed prompts. The cache key now includes the resolved file path (`lib/prompts.ts`). This reproduced reliably on Linux, where consecutive file writes share a millisecond, and intermittently on Windows; the regression test now pins both files to an identical timestamp so it fails on every platform without the fix.
+- CI failed on Linux: the in-app auto update is a Windows x64 feature, but its suite ran on `ubuntu-latest` and asserted Windows-only behaviour. Those tests are now skipped on other platforms instead of failing, and CI runs on both `ubuntu-latest` and `windows-latest` so the updater keeps full coverage.
+
 ## [4.0.0] - 2026-08-16
 
 ### Added

@@ -7,7 +7,14 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # 矩阵化的原因：lib/updater.ts（应用内自动更新）只支持 Windows x64 的正式安装副本，
+    # 它的测试在其它平台会自动跳过（见 lib/updater.test.ts）。跑一份 windows-latest
+    # 才能真实验证更新器，ubuntu 那份则保证其余代码在 Linux 上依然可用。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

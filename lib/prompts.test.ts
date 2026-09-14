@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,11 +20,14 @@ afterEach(() => {
   }
 });
 
-function tempPromptsFile(content: string): string {
+function tempPromptsFile(content: string, mtime?: Date): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "papermate-prompts-"));
   tempDirs.push(dir);
   const file = path.join(dir, "prompts.txt");
   writeFileSync(file, content, "utf8");
+  // 可显式指定修改时间：缓存按 mtime + 路径判断，测试需要构造「同一 mtime 的两个
+  // 不同文件」来验证不会互相命中（Linux 上连续建文件天然就是同一毫秒）。
+  if (mtime) utimesSync(file, mtime, mtime);
   return file;
 }
 
@@ -128,9 +131,11 @@ describe("task prompts", () => {
   it("parses the [websearch] block and falls back to the bundled default", () => {
     const parsed = parsePromptsFile("[websearch]\n只允许引用给定编号 [1]。\n");
     expect(parsed.websearch).toBe("只允许引用给定编号 [1]。");
-    expect(loadWebSearchPrompt(tempPromptsFile("[websearch]\n自定义联网规则。\n"))).toBe("自定义联网规则。");
+    // 两个文件的 mtime 显式设成同一个值：缓存若只比 mtime，第二次会错误命中第一次。
+    const sameMtime = new Date(1700000000000);
+    expect(loadWebSearchPrompt(tempPromptsFile("[websearch]\n自定义联网规则。\n", sameMtime))).toBe("自定义联网规则。");
     // 文件缺失或没有该块时回退内置默认，且不影响任务提示词
-    const file = tempPromptsFile("[translate]\n翻译。\n");
+    const file = tempPromptsFile("[translate]\n翻译。\n", sameMtime);
     expect(loadWebSearchPrompt(file)).toBe(WEB_SEARCH_PROMPT_DEFAULT);
     expect(loadTaskInstructions(file).translate).toBe("翻译。");
   });

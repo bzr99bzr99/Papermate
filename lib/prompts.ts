@@ -59,13 +59,17 @@ interface LoadedPrompts {
 
 let promptsCache: LoadedPrompts | undefined;
 let promptsCacheMtimeMs = -1;
+// 缓存必须同时按「文件路径」区分：只比 mtime 时，同一毫秒内写入的两个不同
+// 文件会互相命中（测试用 mkdtemp 连续建文件时必然发生），返回上一个文件的内容。
+let promptsCachePath = "";
 
 function loadPrompts(
   filePath: string = path.join(process.cwd(), PROMPTS_FILE_RELATIVE_PATH),
 ): LoadedPrompts {
   try {
+    const cacheKey = path.resolve(filePath);
     const mtimeMs = statSync(filePath).mtimeMs;
-    if (promptsCache && promptsCacheMtimeMs === mtimeMs) return promptsCache;
+    if (promptsCache && promptsCachePath === cacheKey && promptsCacheMtimeMs === mtimeMs) return promptsCache;
     const parsed = parsePromptsFile(readFileSync(filePath, "utf8"));
     const instructions: Record<Task, string> = { ...taskInstructions };
     for (const key of Object.keys(taskInstructions) as Task[]) {
@@ -78,6 +82,7 @@ function loadPrompts(
       websearch: parsed.websearch?.trim() || WEB_SEARCH_PROMPT_DEFAULT,
     };
     promptsCacheMtimeMs = mtimeMs;
+    promptsCachePath = cacheKey;
     return promptsCache;
   } catch {
     // 文件缺失或不可读时回退到内置默认提示词
@@ -219,6 +224,8 @@ interface LoadedBuddy {
 
 let buddyCache: LoadedBuddy | undefined;
 let buddyCacheMtimeMs = -1;
+// 同上：陪读小人提示词缓存同样要按文件路径区分。
+let buddyCachePath = "";
 
 /** 解析 [fallback] 语料块：按 "事件|人格|句子" 分组。 */
 export function parseBuddyFallback(content: string): Record<string, string[]> {
@@ -238,8 +245,9 @@ export function parseBuddyFallback(content: string): Record<string, string[]> {
 
 function loadBuddy(filePath: string = path.join(process.cwd(), BUDDY_FILE_RELATIVE_PATH)): LoadedBuddy {
   try {
+    const cacheKey = path.resolve(filePath);
     const mtimeMs = statSync(filePath).mtimeMs;
-    if (buddyCache && buddyCacheMtimeMs === mtimeMs) return buddyCache;
+    if (buddyCache && buddyCachePath === cacheKey && buddyCacheMtimeMs === mtimeMs) return buddyCache;
     const parsed = parseBuddyFile(readFileSync(filePath, "utf8"));
     const personas = { ...BUDDY_PERSONA_DEFAULTS };
     for (const key of Object.keys(BUDDY_PERSONA_DEFAULTS) as BuddyPersona[]) {
@@ -251,6 +259,7 @@ function loadBuddy(filePath: string = path.join(process.cwd(), BUDDY_FILE_RELATI
       fallback: parsed.fallback?.trim() || "",
     };
     buddyCacheMtimeMs = mtimeMs;
+    buddyCachePath = cacheKey;
     return buddyCache;
   } catch {
     return { personas: BUDDY_PERSONA_DEFAULTS, fallback: "" };

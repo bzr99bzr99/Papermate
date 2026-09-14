@@ -12,6 +12,15 @@ import { lockForUpdate, unlockUpdate, beginModelRequest } from "./update-activit
 let appData = "";
 let installDir = "";
 let previousEnv: string | undefined;
+
+/**
+ * 自动更新只支持 Windows x64 的正式安装副本（见 lib/updater.ts 的 supported 判定），
+ * 因此整个文件在其它平台跳过：这些用例断言的是 Windows 专属的行为与路径语义，
+ * 在 Linux/macOS 上失败只代表平台不符，不代表代码回归。
+ * CI 的 windows-latest 分支会完整运行它们（见 .github/workflows/ci.yml）。
+ */
+const WINDOWS_X64 = process.platform === "win32" && process.arch === "x64";
+
 const originalCwd = process.cwd();
 const updatesDir = () => path.join(appData, "updates");
 const statusFile = () => path.join(updatesDir(), "status.json");
@@ -175,7 +184,7 @@ afterEach(() => {
   rmSync(installDir, { recursive: true, force: true });
 });
 
-describe("更新环境识别", () => {
+describe.skipIf(!WINDOWS_X64)("更新环境识别", () => {
   it("登记为正式安装副本时 supported 为 true，并报告当前版本", () => {
     const status = updateStatus();
     expect(status.supported).toBe(true);
@@ -189,7 +198,7 @@ describe("更新环境识别", () => {
   });
 });
 
-describe("检测更新（优先走不消耗 API 配额的路径）", () => {
+describe.skipIf(!WINDOWS_X64)("检测更新（优先走不消耗 API 配额的路径）", () => {
   it("没有新版：给出明确结论、不带更新说明，且只打一次网页跳转", async () => {
     const record: string[] = [];
     stubGitHub({ pageTag: "v" + version, record });
@@ -273,7 +282,7 @@ describe("检测更新（优先走不消耗 API 配额的路径）", () => {
   });
 });
 
-describe("下载更新包", () => {
+describe.skipIf(!WINDOWS_X64)("下载更新包", () => {
   it("按 tag 直接构造附件地址并校验通过，进入 ready", async () => {
     const record: string[] = [];
     stubGitHub({ pageTag: "v99.9", record });
@@ -335,7 +344,7 @@ describe("下载更新包", () => {
   });
 });
 
-describe("中断恢复", () => {
+describe.skipIf(!WINDOWS_X64)("中断恢复", () => {
   it("上次会话中断的 downloading 会被重置，用户不会永久卡住", () => {
     writeStatus({ phase: "downloading", progress: 37, ownerPid: 999999, updatedAt: Date.now() });
     writeFileSync(lockFile(), "");
@@ -368,7 +377,7 @@ describe("中断恢复", () => {
   });
 });
 
-describe("安装前置条件", () => {
+describe.skipIf(!WINDOWS_X64)("安装前置条件", () => {
   it("更新包没准备好时拒绝安装", () => {
     writeStatus({ phase: "idle" });
     expect(() => installUpdate()).toThrow(/尚未就绪/);
@@ -393,7 +402,7 @@ describe("安装前置条件", () => {
   });
 });
 
-describe("更新互斥", () => {
+describe.skipIf(!WINDOWS_X64)("更新互斥", () => {
   it("lockForUpdate 在有活动请求时抛错，请求结束后可用", () => {
     const finish = beginModelRequest();
     expect(() => lockForUpdate()).toThrow();
@@ -408,7 +417,7 @@ describe("更新互斥", () => {
  * 安装助手由 Windows PowerShell 5.1 执行，它的 Get-Content 默认按系统 ANSI 代码页解码，
  * 没有 BOM 的 UTF-8 文件会被解成乱码，轻则提示文字乱、重则路径解析失败直接更新中止。
  */
-describe("编码不变式（中文安装路径）", () => {
+describe.skipIf(!WINDOWS_X64)("编码不变式（中文安装路径）", () => {
   it("apply-update.ps1 自身必须带 UTF-8 BOM", () => {
     const file = fileURLToPath(new URL("../scripts/apply-update.ps1", import.meta.url));
     expect(hasBom(file)).toBe(true);
