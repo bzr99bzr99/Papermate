@@ -206,6 +206,20 @@ describe("SQLite paper storage", () => {
     });
     storage.savePaper(enriched);
     expect(storage.listPaperMetas()[0].journal).toBe("Legacy Journal");
+
+    // 补齐台账字段也要随迁移一起出现（老库补列后才能存这些值）。
+    storage.savePaper({
+      ...enriched,
+      linksCheckedAt: "2026-09-14T00:00:00.000Z",
+      linksAttempts: 2,
+      metadataCheckedAt: "2026-09-14T01:00:00.000Z",
+      metadataAttempts: 3,
+    });
+    const saved = storage.getPaper("old-paper");
+    expect(saved?.linksCheckedAt).toBe("2026-09-14T00:00:00.000Z");
+    expect(saved?.linksAttempts).toBe(2);
+    expect(saved?.metadataCheckedAt).toBe("2026-09-14T01:00:00.000Z");
+    expect(saved?.metadataAttempts).toBe(3);
   });
 
   it("rejects duplicate source hashes and finds papers by hash", () => {

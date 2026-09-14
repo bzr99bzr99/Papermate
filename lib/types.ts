@@ -119,6 +119,15 @@ export interface Paper {
   pageCount: number;
   outline?: PaperSection[];
   originalReady?: boolean;
+  /**
+   * 补齐台账：上次尝试补排版数据（links/textItems）的时间与连续失败次数。
+   * 用来做失败后的冷却重试，避免"补不上就每次打开都重解析整本 PDF"。
+   */
+  linksCheckedAt?: string;
+  linksAttempts?: number;
+  /** 补齐台账：上次查询元数据（标题/期刊/影响因子/关键词）的时间与连续失败次数。 */
+  metadataCheckedAt?: string;
+  metadataAttempts?: number;
 }
 
 export interface PaperMeta {

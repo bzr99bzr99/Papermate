@@ -31,6 +31,10 @@ interface PaperRow {
   pinned: number;
   pdf: Uint8Array | null;
   parsed_json: string;
+  links_checked_at: string | null;
+  links_attempts: number | null;
+  metadata_checked_at: string | null;
+  metadata_attempts: number | null;
 }
 
 interface WorkspaceRow {
@@ -119,6 +123,10 @@ function paperToRow(paper: BackupPaper): {
       buffer,
       parsed,
       paper.lastReadAt && Number.isFinite(Date.parse(paper.lastReadAt)) ? new Date(paper.lastReadAt).toISOString() : null,
+      paper.linksCheckedAt ?? null,
+      paper.linksAttempts ?? 0,
+      paper.metadataCheckedAt ?? null,
+      paper.metadataAttempts ?? 0,
     ],
   };
 }
@@ -146,6 +154,10 @@ function rowToBackupPaper(row: PaperRow): BackupPaper {
     outline: parsed.outline,
     originalReady: Boolean(row.original_ready),
     pinned: Boolean(row.pinned),
+    linksCheckedAt: row.links_checked_at ?? undefined,
+    linksAttempts: row.links_attempts ?? 0,
+    metadataCheckedAt: row.metadata_checked_at ?? undefined,
+    metadataAttempts: row.metadata_attempts ?? 0,
     file: {
       name: row.file_name,
       type: "application/pdf",
@@ -195,7 +207,11 @@ export function openStorage(options: {
       pinned INTEGER NOT NULL DEFAULT 0,
       sort_order REAL NOT NULL DEFAULT 0,
       pdf BLOB,
-      parsed_json TEXT NOT NULL
+      parsed_json TEXT NOT NULL,
+      links_checked_at TEXT,
+      links_attempts INTEGER NOT NULL DEFAULT 0,
+      metadata_checked_at TEXT,
+      metadata_attempts INTEGER NOT NULL DEFAULT 0
     );
   `);
   const existingPaperColumns = new Set(
@@ -221,6 +237,19 @@ export function openStorage(options: {
   if (!existingPaperColumns.has("sort_order")) {
     db.exec("ALTER TABLE papers ADD COLUMN sort_order REAL NOT NULL DEFAULT 0");
   }
+  // 补齐台账：记录上次补齐排版数据/元数据的时间与连续失败次数，用于冷却重试。
+  if (!existingPaperColumns.has("links_checked_at")) {
+    db.exec("ALTER TABLE papers ADD COLUMN links_checked_at TEXT");
+  }
+  if (!existingPaperColumns.has("links_attempts")) {
+    db.exec("ALTER TABLE papers ADD COLUMN links_attempts INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!existingPaperColumns.has("metadata_checked_at")) {
+    db.exec("ALTER TABLE papers ADD COLUMN metadata_checked_at TEXT");
+  }
+  if (!existingPaperColumns.has("metadata_attempts")) {
+    db.exec("ALTER TABLE papers ADD COLUMN metadata_attempts INTEGER NOT NULL DEFAULT 0");
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS workspaces (
       paper_id TEXT PRIMARY KEY,
@@ -238,8 +267,9 @@ export function openStorage(options: {
   const insertPaperStatement = db.prepare(`
     INSERT INTO papers (
       id, title, file_name, source_hash, keywords, journal_name, impact_factor,
-      note, created_at, updated_at, page_count, original_ready, pinned, pdf, parsed_json, last_read_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      note, created_at, updated_at, page_count, original_ready, pinned, pdf, parsed_json, last_read_at,
+      links_checked_at, links_attempts, metadata_checked_at, metadata_attempts
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       file_name = excluded.file_name,
@@ -255,7 +285,11 @@ export function openStorage(options: {
       pinned = excluded.pinned,
       pdf = excluded.pdf,
       parsed_json = excluded.parsed_json,
-      last_read_at = NULLIF(MAX(COALESCE(papers.last_read_at, ''), COALESCE(excluded.last_read_at, '')), '')
+      last_read_at = NULLIF(MAX(COALESCE(papers.last_read_at, ''), COALESCE(excluded.last_read_at, '')), ''),
+      links_checked_at = excluded.links_checked_at,
+      links_attempts = excluded.links_attempts,
+      metadata_checked_at = excluded.metadata_checked_at,
+      metadata_attempts = excluded.metadata_attempts
   `);
   const selectPaperById = db.prepare("SELECT * FROM papers WHERE id = ?");
   const selectPaperByHash = db.prepare("SELECT * FROM papers WHERE source_hash = ?");

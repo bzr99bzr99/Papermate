@@ -63,7 +63,7 @@ jobs:
           $out = Join-Path $PWD 'artifacts/unpack-check'
           if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
           Expand-Archive -LiteralPath $archive -DestinationPath $out
-          $required = @('server.js', 'node.exe', 'package.json', 'papermate-version.json', '.next\BUILD_ID', 'public\prompts.txt', 'scripts\apply-update.ps1', 'scripts\launch-update.ps1')
+          $required = @('server.js', 'node.exe', 'package.json', 'papermate-version.json', '.next\BUILD_ID', 'public\prompts.txt', 'scripts\apply-update.ps1', 'scripts\launch-update.ps1', 'scripts\install-package.ps1', '一键安装.bat', '一键卸载.bat')
           foreach ($item in $required) {
             if (-not (Test-Path -LiteralPath (Join-Path $out $item))) { throw "压缩包缺少：$item" }
           }

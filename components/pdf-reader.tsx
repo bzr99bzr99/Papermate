@@ -168,7 +168,9 @@ async function buildPageLinks(
         url,
       });
     }
-    return links.length ? links : undefined;
+    // 确实没有链接注解时返回空数组：这样"扫过一遍、没有链接"（[]）与"没能确定"（undefined，
+    // 例如注解读取失败）就能区分开——前者不该每次打开论文都重扫一遍。
+    return links;
   } catch {
     return undefined;
   }
@@ -321,7 +323,8 @@ export async function repairPaperOriginalMetadata(paper: Paper): Promise<Paper> 
         height: metadataPage.height,
         rotation: metadataPage.rotation,
         textItems: metadataPage.textItems,
-        links: metadataPage.links,
+        // 解析失败（undefined）时保留原值，免得把"有链接"误写成"没有链接"。
+        links: metadataPage.links ?? previous.links,
       };
     });
     return {
@@ -458,6 +461,8 @@ interface SelectionTextPoint {
   offset: number;
   clientX: number;
   clientY: number;
+  /** 记录该点时的滚动位置。拖动过程中滚动过的话，clientY 已经过期，需要按滚动量换算。 */
+  scrollTop: number;
 }
 
 interface SelectionItems {
@@ -722,6 +727,7 @@ function selectionPointAtPosition(
     offset: offsetAtClientX(span, clientX, clientY),
     clientX,
     clientY,
+    scrollTop: stack.closest<HTMLElement>(".reader-column")?.scrollTop ?? 0,
   };
 }
 
@@ -751,13 +757,22 @@ function selectionItemsBetweenPoints(
     boxes.push({ index, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
   }
 
+  // 起点/终点存的是"按下那一刻"的屏幕坐标。拖动中滚动过（滚轮/滚动条）之后，同一段文字
+  // 在屏幕上的位置已经整体移动，旧坐标会让中间那些行被判成"没划到"——表现出来就是松手后
+  // 只剩首尾两行。这里按滚动量把两个点换算回当前屏幕坐标，再和实时矩形一起判断。
+  const scrollNow = stack.closest<HTMLElement>(".reader-column")?.scrollTop ?? 0;
+  // clientY = 容器顶 + (内容坐标 - scrollTop)，所以"现在"的屏幕 Y 是
+  // 捕获时的 clientY 减去这段时间滚过的距离（往下滚 = 内容上移 = clientY 变小）。
+  const startY = start.clientY - (scrollNow - start.scrollTop);
+  const endY = end.clientY - (scrollNow - end.scrollTop);
+
   const itemIndexes = selectItemIndexes({
     boxes,
     lowIndex,
     highIndex,
     // 指针可能停在行上沿/行间，留一点纵向容差
-    pointerTop: Math.min(start.clientY, end.clientY) - SELECTION_POINTER_TOLERANCE,
-    pointerBottom: Math.max(start.clientY, end.clientY) + SELECTION_POINTER_TOLERANCE,
+    pointerTop: Math.min(startY, endY) - SELECTION_POINTER_TOLERANCE,
+    pointerBottom: Math.max(startY, endY) + SELECTION_POINTER_TOLERANCE,
   });
   if (!itemIndexes.length) return undefined;
 
@@ -2170,8 +2185,6 @@ export function PdfReader({
   const zoomFrameRef = useRef(0);
   const wheelDeltaRef = useRef(0);
   const zoomCommitTimerRef = useRef(0);
-  const selectionWheelFrameRef = useRef(0);
-  const selectionPointerRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const zoomValueRef = useRef<HTMLButtonElement>(null);
   const zoomOutButtonRef = useRef<HTMLButtonElement>(null);
   const zoomInButtonRef = useRef<HTMLButtonElement>(null);
@@ -2212,6 +2225,9 @@ export function PdfReader({
     start: SelectionTextPoint;
     end: SelectionTextPoint;
     additive: boolean;
+    // 拖动过程中发生过滚动（滚轮/滚动条）。滚动只移动视口，此时指针的屏幕坐标已经不再
+    // 对应划选时的文字，标记一下，免得按坐标重算把已选中的内容整段丢掉。
+    scrolledSincePointerMove: boolean;
   } | null>(null);
   const pointerGestureRef = useRef<{
     pointerId: number;
@@ -2273,15 +2289,8 @@ export function PdfReader({
 
     const onWheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) {
-        if (selectionRef.current) {
-          selectionPointerRef.current = { x: event.clientX, y: event.clientY };
-          if (!selectionWheelFrameRef.current) {
-            selectionWheelFrameRef.current = window.requestAnimationFrame(() => {
-              selectionWheelFrameRef.current = 0;
-              refreshActiveSelectionFromPointer();
-            });
-          }
-        }
+        // 滚动期间不动已划中的内容（见 handleScroll），否则"滚一下就丢选区"。
+        if (selectionRef.current) selectionRef.current.scrolledSincePointerMove = true;
         return;
       }
       const deltaPixels = normalizeReaderWheelDelta(
@@ -2386,10 +2395,6 @@ export function PdfReader({
       if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
       zoomCommitTimerRef.current = 0;
       wheelDeltaRef.current = 0;
-      if (selectionWheelFrameRef.current) {
-        window.cancelAnimationFrame(selectionWheelFrameRef.current);
-        selectionWheelFrameRef.current = 0;
-      }
       host.removeEventListener("wheel", onWheel);
     };
   }, [readerRef, syncZoomUi]);
@@ -2663,32 +2668,13 @@ export function PdfReader({
     }
   }
 
-  function refreshActiveSelectionFromPointer() {
-    const selection = selectionRef.current;
-    const pointer = selectionPointerRef.current;
-    if (!selection || !pointer) return;
-    const end = selectionPointAtPosition(
-      selection.stack,
-      selection.start,
-      pointer.x,
-      pointer.y,
-    );
-    if (!end) return;
-    selection.end = end;
-    renderCurrentSelectionBetweenPoints(
-      readerRef.current,
-      selection.page,
-      selection.start,
-      end,
-    );
-  }
-
   function handleScroll(event?: React.UIEvent<HTMLElement>) {
     if (scalingRef.current) return;
     if (event && event.target !== event.currentTarget) return;
     scrollSuppressUntilRef.current = performance.now() + 180;
     closeHoverHighlightPopover();
-    if (selectionRef.current) refreshActiveSelectionFromPointer();
+    // 滚动只该移动视口，不该改变"已经划到哪"。
+    if (selectionRef.current) selectionRef.current.scrolledSincePointerMove = true;
     if (scrollFrameRef.current) return;
     scrollFrameRef.current = window.requestAnimationFrame(() => {
       scrollFrameRef.current = null;
@@ -2841,8 +2827,8 @@ export function PdfReader({
       start,
       end: start,
       additive: event.ctrlKey || event.metaKey,
+      scrolledSincePointerMove: false,
     };
-    selectionPointerRef.current = { x: event.clientX, y: event.clientY };
     readerRef.current.setPointerCapture?.(event.pointerId);
     renderCurrentSelectionBetweenPoints(readerRef.current, page, start, start);
   }
@@ -2896,7 +2882,6 @@ export function PdfReader({
     }
     const selection = selectionRef.current;
     if (!selection || event.pointerId !== selection.pointerId) return;
-    selectionPointerRef.current = { x: event.clientX, y: event.clientY };
     const stackAtPoint = stackForPoint(event.clientX, event.clientY);
     const stackAtPointPage = Number(
       stackAtPoint?.parentElement?.getAttribute("data-page"),
@@ -2912,6 +2897,7 @@ export function PdfReader({
     );
     if (!end) return;
     selection.end = end;
+    selection.scrolledSincePointerMove = false;
     renderCurrentSelectionBetweenPoints(
       readerRef.current,
       selection.page,
@@ -2948,15 +2934,17 @@ export function PdfReader({
       return;
     }
     selectionRef.current = null;
-    selectionPointerRef.current = undefined;
     readerRef.current?.releasePointerCapture?.(event.pointerId);
-    const end =
-      selectionPointAtPosition(
-        selection.stack,
-        selection.start,
-        event.clientX,
-        event.clientY,
-      ) ?? selection.end;
+    // 滚动过之后指针屏幕坐标已经不对应划选时的文字：此时必须用拖动过程中记录下来的终点，
+    // 否则会把已经划中的内容按新位置重算，松手瞬间整段丢失（滚轮滚得越多丢得越多）。
+    const end = selection.scrolledSincePointerMove
+      ? selection.end
+      : selectionPointAtPosition(
+          selection.stack,
+          selection.start,
+          event.clientX,
+          event.clientY,
+        ) ?? selection.end;
     const selected = selectionItemsBetweenPoints(
       selection.page,
       selection.stack,
@@ -3011,7 +2999,6 @@ export function PdfReader({
     const selection = selectionRef.current;
     if (!selection || event.pointerId !== selection.pointerId) return;
     selectionRef.current = null;
-    selectionPointerRef.current = undefined;
     readerRef.current?.releasePointerCapture?.(event.pointerId);
     window.getSelection()?.removeAllRanges();
     clearCurrentSelectionHighlights(readerRef.current);

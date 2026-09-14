@@ -96,6 +96,11 @@ import {
   type PaperMetadataPatch,
 } from "@/lib/paper-metadata";
 import {
+  countUnresolvedLinks,
+  nextBackfillRecord,
+  planPaperMaintenance,
+} from "@/lib/paper-maintenance";
+import {
   anchorExcerptParts,
   buildPaperDigest,
   defaultHighlightColor,
@@ -1242,65 +1247,134 @@ export default function Home() {
       setNotice("这篇论文不存在或已被删除。");
       return;
     }
-    const fileNameBase = full.fileName.replace(/\.pdf$/i, "");
-    const titleIsFileName =
-      full.title === fileNameBase || full.title === full.fileName;
-    const titleNeedsLookup = titleIsFileName || isWeakPaperTitle(full.title);
-    // 缺少影响因子时，每次打开都会在后台重试补齐（成功一次后即持久化，
-    // 之后不再发起请求），OpenAlex 限流恢复后影响因子会自动出现。
-    const needsMetaLookup =
-      titleNeedsLookup || !full.impactFactor;
-    // 旧版本数据没有 links 字段（所有页都缺失）或内部链接缺少目标坐标时需要重新解析补齐；
-    // 若已有完整 links（即使某页恰好无链接）则不重复解析。
-    const hasStaleLinks = full.pages.some((page) =>
-      page.links?.some((link) => link.targetPage !== undefined && link.targetTop === undefined),
-    );
-    const needsLinkRepair =
-      full.pages.length > 0 &&
-      (full.pages.every((page) => page.links === undefined) || hasStaleLinks);
-    // 存量数据可能缺失文本项（中间版本导入/旧版本），划选高亮依赖 textItems，
-    // 缺失时同样需要重解析补齐。
-    const needsTextRepair = !pagesHaveSelectableText(full.pages);
-    const needsRepair = needsLinkRepair || needsTextRepair;
-    const repairing = !full.originalReady || needsRepair;
-    if (needsMetaLookup || repairing) {
-      setBackfillingId(item.id);
-      setNotice("正在补齐这篇论文的元数据和排版数据…");
-    }
-    try {
-      // 排版数据（links/textItems）缺失时先同步修复，保证打开后划选、跳转可用；
-      // 元数据补齐放后台，不阻塞阅读。
-      let opened = full;
-      if (repairing) {
-        opened = await repairPaperOriginalMetadata(full);
-        if (opened.originalReady) {
-          setPapers((current) =>
-            current.map((entry) =>
-              entry.id === opened.id ? paperToMeta(opened) : entry,
-            ),
-          );
-          await savePaper(opened);
-        }
-      }
-      setPaper(opened);
-      buddyEvent("paper-open", opened.title);
-      if (!opened.originalReady) {
-        setNotice("未读取到文本层，仍会显示原版页面。");
-      } else if (repairing && !needsMetaLookup) {
-        setNotice("已补齐这篇论文的排版数据。");
-      }
-      if (needsMetaLookup) {
-        void enrichPaperMetadata(opened, titleNeedsLookup);
-      } else {
-        setBackfillingId(undefined);
-      }
-    } catch (error) {
+    // 要不要补、补完能不能不再补，交给 lib/paper-maintenance.ts 的台账逻辑判定：
+    // 它区分"确实没有链接"（links: []，已扫过）与"没能确定"（undefined），
+    // 并对补不上的情况按冷却时间 + 次数上限重试。
+    const plan = planPaperMaintenance({
+      title: full.title,
+      fileName: full.fileName,
+      impactFactor: full.impactFactor,
+      pages: full.pages,
+      originalReady: full.originalReady,
+      linksCheckedAt: full.linksCheckedAt,
+      linksAttempts: full.linksAttempts,
+      metadataCheckedAt: full.metadataCheckedAt,
+      metadataAttempts: full.metadataAttempts,
+    });
+
+    // 先用本地已有数据把论文打开：补齐一律放后台，不再阻塞阅读。
+    setPaper(full);
+    buddyEvent("paper-open", full.title);
+
+    const runLayout = plan.layout.due;
+    const runMetadata = plan.metadata.due;
+    if (!runLayout && !runMetadata) {
       setBackfillingId(undefined);
-      setNotice(error instanceof Error ? error.message : "补齐论文信息失败，请稍后重试。");
+      return;
+    }
+
+    setBackfillingId(item.id);
+    if (runLayout && runMetadata) {
+      setNotice("正在后台补齐排版数据，并查询期刊信息…");
+    } else if (runLayout) {
+      setNotice("正在后台补齐排版数据（跳转链接与划选文本）…");
+    } else {
+      setNotice("正在查询期刊影响因子与关键词…");
+    }
+
+    // 两种补齐互不阻塞，都结束（成功或失败）之后再收起进度状态。
+    let pending = (runLayout ? 1 : 0) + (runMetadata ? 1 : 0);
+    const settle = () => {
+      pending -= 1;
+      if (pending <= 0) setBackfillingId(undefined);
+    };
+    if (runLayout) void repairPaperLayout(full, settle);
+    if (runMetadata) {
+      void enrichPaperMetadata(full, plan.metadata.titleNeedsLookup, settle);
     }
   }
 
-  async function enrichPaperMetadata(paper: Paper, titleNeedsLookup: boolean) {
+  /**
+   * 后台重解析 PDF 的排版数据（links/textItems），并把这次尝试写进"补齐台账"：
+   * 补好了（不再需要补）清零连续失败次数，补不上就累加 —— 之后按冷却时间重试，
+   * 超过上限不再自动重试。失败时保留原有数据，不会因为一次解析失败而丢内容。
+   */
+  async function repairPaperLayout(paper: Paper, settle: () => void) {
+    const previousRecord = {
+      checkedAt: paper.linksCheckedAt,
+      attempts: paper.linksAttempts,
+    };
+    try {
+      const opened = await repairPaperOriginalMetadata(paper);
+      const remaining = planPaperMaintenance({
+        title: opened.title,
+        fileName: opened.fileName,
+        impactFactor: opened.impactFactor,
+        pages: opened.pages,
+        originalReady: opened.originalReady,
+      });
+      const record = nextBackfillRecord(previousRecord, !remaining.layout.needed);
+      const updated: Paper = {
+        ...opened,
+        linksCheckedAt: record.checkedAt,
+        linksAttempts: record.attempts,
+      };
+      setPaper((current) => (current?.id === updated.id ? updated : current));
+      setPapers((current) =>
+        current.map((entry) =>
+          entry.id === updated.id ? paperToMeta(updated) : entry,
+        ),
+      );
+      await savePaper(updated);
+      if (!updated.originalReady) {
+        setNotice("未读取到文本层，仍会显示原版页面。");
+      } else if (!remaining.layout.needed) {
+        setNotice("已补齐排版数据。");
+      } else {
+        const unresolved = countUnresolvedLinks(updated.pages);
+        setNotice(
+          unresolved
+            ? `排版数据已更新，还有 ${unresolved} 个内部链接的目标位置补不上（已记下，不再反复重试）。`
+            : "排版数据已更新，仍有部分内容补不上（已记下，不再反复重试）。",
+        );
+      }
+    } catch (error) {
+      const record = nextBackfillRecord(previousRecord, false);
+      const failed: Paper = {
+        ...paper,
+        linksCheckedAt: record.checkedAt,
+        linksAttempts: record.attempts,
+      };
+      setPaper((current) => (current?.id === failed.id ? failed : current));
+      setPapers((current) =>
+        current.map((entry) =>
+          entry.id === failed.id ? paperToMeta(failed) : entry,
+        ),
+      );
+      await savePaper(failed).catch(() => undefined);
+      setNotice(
+        error instanceof Error && error.message.includes("文本层")
+          ? error.message
+          : "补齐排版数据失败，已记下，稍后重试。",
+      );
+    } finally {
+      settle();
+    }
+  }
+
+  /**
+   * 后台查询期刊元数据（标题/期刊/影响因子/关键词），同样把尝试结果写进台账：
+   * 查到东西就算成功并清零；一直查不到就按冷却时间重试、超过上限不再自动查。
+   */
+  async function enrichPaperMetadata(
+    paper: Paper,
+    titleNeedsLookup: boolean,
+    settle: () => void,
+  ) {
+    const previousRecord = {
+      checkedAt: paper.metadataCheckedAt,
+      attempts: paper.metadataAttempts,
+    };
     try {
       const firstPageBlocks = firstPageMetadataBlocks(paper.pages);
       const metadata = await lookupPaperMetadata({
@@ -1315,13 +1389,6 @@ export default function Home() {
       const nextTitle = titleNeedsLookup
         ? metadata.title?.trim() || paper.title
         : paper.title;
-      const enriched: Paper = {
-        ...paper,
-        title: nextTitle,
-        keywords: metadata.keywords?.length ? metadata.keywords : paper.keywords,
-        journal: metadata.journal || paper.journal,
-        impactFactor: metadata.impactFactor || paper.impactFactor,
-      };
       const changed =
         nextTitle !== paper.title ||
         Boolean(
@@ -1329,20 +1396,51 @@ export default function Home() {
             metadata.journal ||
             metadata.impactFactor,
         );
+      // "成功"的判定与排版数据保持一致：不是"查到点东西"就算成功，而是"当初要查的原因解决了"
+      // （标题不再像文件名、影响因子已拿到）。否则一直查不到影响因子的论文会被无限重试。
+      const afterLookup = planPaperMaintenance({
+        title: nextTitle,
+        fileName: paper.fileName,
+        impactFactor: metadata.impactFactor || paper.impactFactor,
+        pages: paper.pages,
+        originalReady: paper.originalReady,
+      });
+      const record = nextBackfillRecord(previousRecord, !afterLookup.metadata.needed);
+      const enriched: Paper = {
+        ...paper,
+        title: nextTitle,
+        keywords: metadata.keywords?.length ? metadata.keywords : paper.keywords,
+        journal: metadata.journal || paper.journal,
+        impactFactor: metadata.impactFactor || paper.impactFactor,
+        metadataCheckedAt: record.checkedAt,
+        metadataAttempts: record.attempts,
+      };
       setPaper((current) => (current?.id === enriched.id ? enriched : current));
-      if (changed) {
-        setPapers((items) =>
-          items.map((entry) =>
-            entry.id === enriched.id ? paperToMeta(enriched) : entry,
-          ),
-        );
-        await savePaper(enriched);
-        setNotice("已补齐这篇论文的元数据。");
-      }
+      setPapers((items) =>
+        items.map((entry) =>
+          entry.id === enriched.id ? paperToMeta(enriched) : entry,
+        ),
+      );
+      await savePaper(enriched);
+      if (changed) setNotice("已补齐期刊元数据。");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "补齐论文信息失败，请稍后重试。");
+      const record = nextBackfillRecord(previousRecord, false);
+      const failed: Paper = {
+        ...paper,
+        metadataCheckedAt: record.checkedAt,
+        metadataAttempts: record.attempts,
+      };
+      setPapers((items) =>
+        items.map((entry) =>
+          entry.id === failed.id ? paperToMeta(failed) : entry,
+        ),
+      );
+      await savePaper(failed).catch(() => undefined);
+      setNotice(
+        error instanceof Error ? error.message : "查询期刊信息失败，已记下，稍后重试。",
+      );
     } finally {
-      setBackfillingId(undefined);
+      settle();
     }
   }
 
