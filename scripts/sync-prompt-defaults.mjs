@@ -6,7 +6,7 @@ const root = new URL("../", import.meta.url);
 const source = await readFile(new URL("public/prompts.txt", root), "utf8");
 const blocks = Object.fromEntries([...source.matchAll(/^\[([a-z]+)\]\s*\r?\n([\s\S]*?)(?=^\[[a-z]+\]\s*$|(?![\s\S]))/gm)].map((m) => [m[1], m[2].trim()]));
 const tasks = ["translate", "context", "concept", "free", "notes", "mindmap", "writing"];
-for (const key of ["system", ...tasks]) {
+for (const key of ["system", "websearch", ...tasks]) {
   if (!blocks[key]) throw new Error(`Missing prompt block: ${key}`);
 }
 const target = new URL("lib/prompts.ts", root);
@@ -16,6 +16,6 @@ const end = original.indexOf("/**\n * 提示词保存在", start);
 const crlfEnd = original.indexOf("/**\r\n * 提示词保存在", start);
 const boundary = end >= 0 ? end : crlfEnd;
 if (start < 0 || boundary < 0) throw new Error("Prompt source boundaries not found");
-const generated = `export const taskInstructions: Record<Task, string> = ${JSON.stringify(Object.fromEntries(tasks.map((key) => [key, blocks[key]])), null, 2)};\n\n/** Bundled fallback; update with scripts/sync-prompt-defaults.mjs. */\nexport const SYSTEM_PROMPT_DEFAULT = ${JSON.stringify(blocks.system)};\n\n`;
+const generated = `export const taskInstructions: Record<Task, string> = ${JSON.stringify(Object.fromEntries(tasks.map((key) => [key, blocks[key]])), null, 2)};\n\n/** Bundled fallback; update with scripts/sync-prompt-defaults.mjs. */\nexport const SYSTEM_PROMPT_DEFAULT = ${JSON.stringify(blocks.system)};\n\n/** 联网检索时追加的规则（public/prompts.txt 的 [websearch] 块，缺失时用内置默认）。 */\nexport const WEB_SEARCH_PROMPT_DEFAULT = ${JSON.stringify(blocks.websearch)};\n\n`;
 await writeFile(target, original.slice(0, start) + generated + original.slice(boundary));
 console.log(`Synced ${tasks.length} tasks and system prompt to ${fileURLToPath(target)}`);

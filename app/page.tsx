@@ -10,6 +10,7 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import {
   Bot,
@@ -96,15 +97,17 @@ import {
 } from "@/lib/paper-metadata";
 import {
   anchorExcerptParts,
-  buildContext,
   buildPaperDigest,
   defaultHighlightColor,
   deriveHighlightRegions,
+  formatAnchorExcerpt,
   HIGHLIGHT_COLORS,
   MAX_SELECTION_FRAGMENTS,
   pagesHaveSelectableText,
   selectionGroupForAnchors,
 } from "@/lib/pdf";
+import { UpdateManager, CheckUpdateButton } from "@/components/update-manager";
+import { HISTORY_MESSAGE_LIMIT, hasCompletedTranslation, activeIndexTurn, buildSelectionRequest, conversationMatchesSelection, mergeSelectionConversations, selectionTitle } from "@/lib/conversations";
 import { markdownToMindMap, mindMapToSvg } from "@/lib/mindmap";
 import { loadReaderQuotes, READER_QUOTES } from "@/lib/quotes";
 import { blobSha256 } from "@/lib/source-hash";
@@ -134,12 +137,28 @@ import type {
   SelectionGroup,
   TextAnchor,
 } from "@/lib/types";
+import {
+  SEARCH_PROVIDER_META,
+  WEB_SEARCH_CONTENT_SIZE_OPTIONS,
+  WEB_SEARCH_MODE_LABELS,
+  WEB_SEARCH_RECENCY_OPTIONS,
+  ZHIPU_SEARCH_ENGINES,
+  isWebSearchMode,
+  linkifyCitations,
+  nextWebSearchMode,
+  shouldSearchWeb,
+  type WebSearchConfig,
+  type WebSearchConfigView,
+  type WebSearchMode,
+  type WebSearchSource,
+} from "@/lib/web-search";
 
 type RightView = "chat" | ArtifactKind;
 type KeyState = "idle" | "testing" | "valid" | "invalid";
 
 const THEME_KEY = "papermate-theme-v1";
 const LAYOUT_KEY = "papermate-layout-v1";
+const WEB_SEARCH_MODE_KEY = "papermate-websearch-mode-v1";
 const BACKUP_FILE_PATH = "data/papermate-backup.json";
 
 /* ---------- 模型选择：内置 4 个模型 + 用户在设置中添加的自定义模型；快速/深度按钮只切换“思考”开关，不换模型 ---------- */
@@ -319,51 +338,22 @@ function debounce(fn: () => void | Promise<void>, delay: number) {
   return { schedule, flush };
 }
 
-function isNormalScope(conversation: Conversation): boolean {
-  return (conversation.scope ?? "normal") === "normal";
-}
-
 function normalizedQuote(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-/** 一条提问记录对应的原文引文（取首个片段），用于同内容去重。 */
-function turnQuote(turn: ChatTurn): string {
-  const anchor = turn.selection?.anchors[0] ?? turn.anchor;
-  return anchor ? normalizedQuote(anchor.quote) : "";
-}
-
-function conversationMatchesSelection(
-  conversation: Conversation,
-  selection?: SelectionGroup,
-  anchor?: TextAnchor,
-): boolean {
-  if (selection) {
-    return (
-      conversation.selection?.id === selection.id ||
-      conversation.anchor?.id === selection.anchors[0]?.id
-    );
-  }
-  return anchor ? conversation.anchor?.id === anchor.id : false;
-}
-
-function buildContextHistoryMessages(turns: ChatTurn[], fullDigest: string) {
-  const firstContextIndex = turns.findIndex(
-    (turn) => turn.role === "user" && turn.kind === "context",
-  );
-  if (firstContextIndex < 0) {
-    return turns.slice(-10).map((turn) => ({ role: turn.role, content: turn.content }));
-  }
-  const first = turns[firstContextIndex];
-  const tail = turns.slice(-9);
-  if (!tail.some((turn) => turn.id === first.id)) tail.unshift(first);
-  return tail.map((turn) => ({
-    role: turn.role,
-    content:
-      turn.id === first.id && fullDigest.trim()
-        ? `${turn.content}\n\n[论文全文摘要与结构]\n${fullDigest}`
-        : turn.content,
-  }));
+function translationIndexText(turn: ChatTurn, conversation: Conversation): string {
+  const anchors = turn.selection?.anchors.length
+    ? turn.selection.anchors
+    : turn.anchor
+      ? [turn.anchor]
+      : conversation.selection?.anchors.length
+        ? conversation.selection.anchors
+        : conversation.anchor
+          ? [conversation.anchor]
+          : [];
+  const source = anchors.map((anchor) => normalizedQuote(anchor.quote)).filter(Boolean).join(" / ");
+  return source ? formatAnchorExcerpt(source, 64, 28) : turn.content;
 }
 
 function downloadFile(name: string, content: string, type: string) {
@@ -544,13 +534,63 @@ export default function Home() {
   rightViewRef.current = rightView;
   const taskPaperRef = useRef<Record<string, string>>({});
   const [contextMode, setContextMode] = useState(false);
-  // 翻译模式：开启后划选原文立即翻译，并保持按钮选中状态。
-  const [translateMode, setTranslateMode] = useState(false);
+  // 自动翻译是独立开关；普通“翻译”按钮只执行一次当前选区翻译。
+  const [autoTranslate, setAutoTranslate] = useState(false);
+  // 联网搜索：关闭 / 自动（规则判断）/ 强制每次都搜；选择持久化在本机。
+  const [webSearchMode, setWebSearchMode] = useState<WebSearchMode>(() => {
+    try {
+      const saved = window.localStorage.getItem(WEB_SEARCH_MODE_KEY);
+      return isWebSearchMode(saved) ? saved : "off";
+    } catch {
+      return "off";
+    }
+  });
+  function cycleWebSearchMode() {
+    const next = nextWebSearchMode(webSearchMode);
+    setWebSearchMode(next);
+    try {
+      window.localStorage.setItem(WEB_SEARCH_MODE_KEY, next);
+    } catch {
+      /* 忽略 */
+    }
+    setNotice(WEB_SEARCH_MODE_LABELS[next].title);
+  }
+  const translateShortcutActionRef = useRef<() => void>(() => {});
+  const toggleAutoTranslateShortcutActionRef = useRef<() => void>(() => {});
+  const translationShortcutsEnabledRef = useRef(false);
   // 点击空白处清空选区后，右侧问答面板回到空白态（不回落显示其他历史会话）。
   const [panelCleared, setPanelCleared] = useState(false);
   const [pendingColor, setPendingColor] = useState<HighlightColor>(HIGHLIGHT_COLORS[0]);
   const [uploadState, setUploadState] = useState<"idle" | "loading" | "error">("idle");
   const [backfillingId, setBackfillingId] = useState<string>();
+
+  translationShortcutsEnabledRef.current = Boolean(paper && !settingsOpen);
+  useEffect(() => {
+    const onTranslationShortcut = (event: KeyboardEvent) => {
+      if (
+        event.repeat ||
+        !translationShortcutsEnabledRef.current ||
+        !event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.code !== "KeyT"
+      ) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || Boolean(target.closest("input, textarea, select, [contenteditable='true']")))
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.shiftKey) toggleAutoTranslateShortcutActionRef.current();
+      else translateShortcutActionRef.current();
+    };
+    window.addEventListener("keydown", onTranslationShortcut);
+    return () => window.removeEventListener("keydown", onTranslationShortcut);
+  }, []);
   // 陪读小人显示/隐藏（隐藏后完全卸载，不再说话、不再请求模型）
   const [buddyVisible, setBuddyVisible] = useState<boolean>(() => {
     try {
@@ -618,6 +658,8 @@ export default function Home() {
   layoutRef.current = { leftWidth, rightWidth, leftCollapsed, rightCollapsed };
   const settingsLoadedRef = useRef(false);
   const pendingWorkspaceRef = useRef<PaperWorkspace | null>(null);
+  const pendingWorkspacePaperIdRef = useRef<string | undefined>(undefined);
+  const backgroundSaveQueuesRef = useRef(new Map<string, Promise<void>>());
   const workspaceRef = useRef<PaperWorkspace>(blankWorkspace);
   workspaceRef.current = workspace;
   const runningChatIdsRef = useRef<Set<string>>(new Set());
@@ -654,7 +696,7 @@ export default function Home() {
   const saveWorkspaceDebouncer = useMemo(
     () =>
       debounce(() => {
-        const id = paperIdRef.current;
+        const id = pendingWorkspacePaperIdRef.current;
         const next = pendingWorkspaceRef.current;
         if (!id || !next) return;
         pendingWorkspaceRef.current = null;
@@ -667,7 +709,7 @@ export default function Home() {
   // 在防抖窗口内直接关闭页面可能丢失最后一次写入，这里用 keepalive 尽力补写。
   useEffect(() => {
     const flushOnExit = () => {
-      const id = paperIdRef.current;
+      const id = pendingWorkspacePaperIdRef.current;
       const next = pendingWorkspaceRef.current;
       if (!id || !next) return;
       void saveWorkspace(id, next, true).catch(() => {});
@@ -995,7 +1037,16 @@ export default function Home() {
     setWorkspace(blankWorkspace);
     void getWorkspace(paper.id)
       .then((loaded) => {
-        if (paperIdRef.current === paper.id) setWorkspace(loaded);
+        if (paperIdRef.current === paper.id) {
+          const normalized = { ...loaded, conversations: mergeSelectionConversations(loaded.conversations) };
+          setWorkspace(normalized);
+          workspaceRef.current = normalized;
+          if (JSON.stringify(normalized) !== JSON.stringify(loaded)) {
+            pendingWorkspaceRef.current = normalized;
+            pendingWorkspacePaperIdRef.current = paper.id;
+            saveWorkspaceDebouncer.schedule();
+          }
+        }
       })
       .catch(() => setNotice("无法读取这篇论文的本地笔记。"));
   }, [paper, saveWorkspaceDebouncer]);
@@ -1020,32 +1071,17 @@ export default function Home() {
       return undefined;
     }
     const byId = workspace.conversations.find((conversation) => conversation.id === activeConversationId);
-    if (byId) return byId;
-    if (activeSelection) {
-      return workspace.conversations.find(
-        (conversation) =>
-          isNormalScope(conversation) &&
-          conversationMatchesSelection(conversation, activeSelection),
-      ) ?? workspace.conversations.find(
-        (conversation) => conversationMatchesSelection(conversation, activeSelection),
-      );
-    }
-    return workspace.conversations.find(
-      (conversation) =>
-        isNormalScope(conversation) &&
-        conversationMatchesSelection(conversation, undefined, activeAnchor),
-    ) ??
-      workspace.conversations.find(
-        (conversation) => conversationMatchesSelection(conversation, undefined, activeAnchor),
-      ) ??
-      workspace.conversations.find((conversation) => isNormalScope(conversation)) ??
-      workspace.conversations.at(0);
+    if (byId && (!activeSelection || conversationMatchesSelection(byId, activeSelection))) return byId;
+    return workspace.conversations.find((conversation) =>
+      conversationMatchesSelection(conversation, activeSelection, activeAnchor),
+    );
   }, [activeAnchor, activeConversationId, activeSelection, panelCleared, workspace.conversations]);
 
   function commitWorkspace(next: PaperWorkspace) {
     setWorkspace(next);
     workspaceRef.current = next;
     pendingWorkspaceRef.current = next;
+    pendingWorkspacePaperIdRef.current = paperIdRef.current;
     if (paperIdRef.current) saveWorkspaceDebouncer.schedule();
   }
 
@@ -1310,10 +1346,17 @@ export default function Home() {
     }
   }
 
-  function selectAnchor(anchor: TextAnchor, additive: boolean) {
+  function selectAnchor(
+    anchor: TextAnchor,
+    additive: boolean,
+    source: "selection" | "highlight" = "selection",
+  ) {
     if (!paper) return;
     setPanelCleared(false);
-    const nextAnchors = additive
+    const shouldAutoTranslate = autoTranslate && source === "selection";
+    // 自动翻译每次开始新的单选段会话，Ctrl/Cmd 也不组合上一次选区。
+    const appendSelection = additive && !shouldAutoTranslate;
+    const nextAnchors = appendSelection
       ? [...activeAnchors.filter((item) => item.id !== anchor.id), anchor].slice(
           0,
           MAX_SELECTION_FRAGMENTS,
@@ -1321,24 +1364,28 @@ export default function Home() {
       : [anchor];
     const nextSelection = selectionGroupForAnchors(paper.id, nextAnchors);
     setActiveAnchors(nextAnchors);
-    const existing =
-      workspace.conversations.find(
-        (conversation) =>
-          isNormalScope(conversation) &&
-          conversationMatchesSelection(conversation, nextSelection, anchor),
-      ) ??
-      workspace.conversations.find((conversation) =>
-        conversationMatchesSelection(conversation, nextSelection, anchor),
-      );
+    const existing = workspace.conversations.find((conversation) =>
+      conversationMatchesSelection(conversation, nextSelection, anchor),
+    );
     setActiveConversationId(existing?.id);
-    setPendingColor(defaultHighlightColor(workspace.conversations.length));
+    // Ctrl/Cmd 追加片段时沿用当前选区颜色；点击已有高亮时沿用该会话颜色。
+    // 只有开始一个全新选区时，才从调色板选择下一种默认颜色。
+    if (existing?.color) setPendingColor(existing.color);
+    else if (!appendSelection) setPendingColor(defaultHighlightColor(workspace.conversations.length));
     openView("chat");
-    if (translateMode && !additive && !existing) {
-      // 翻译模式已开启：仅对「没有历史问答的新选区」自动翻译；
-      // 点击已问答过的段落只激活选区、查看历史问答，不自动翻译。
-      void sendQuestion("translate", undefined, nextAnchors);
+    if (shouldAutoTranslate) {
+      const singleSelection = nextSelection;
+      const hasTranslation = workspace.conversations.some(
+        (conversation) =>
+          conversationMatchesSelection(conversation, singleSelection, anchor) &&
+          hasCompletedTranslation(conversation),
+      );
+      if (!hasTranslation) {
+        // 仅发送本次新划选，不携带上一次选段或对话历史。
+        void sendQuestion("translate", undefined, [anchor], { preservePendingColor: true });
+      }
     }
-    if (additive && nextAnchors.length === MAX_SELECTION_FRAGMENTS) {
+    if (appendSelection && nextAnchors.length === MAX_SELECTION_FRAGMENTS) {
       setNotice(`一次最多组合 ${MAX_SELECTION_FRAGMENTS} 个片段。`);
     }
   }
@@ -1398,6 +1445,7 @@ export default function Home() {
   }
 
   function updateConversation(conversation: Conversation) {
+    if (conversation.paperId !== paperIdRef.current) return;
     const base = workspaceRef.current;
     const exists = base.conversations.some((item) => item.id === conversation.id);
     if (!exists && deletedConversationIdsRef.current.has(conversation.id)) return;
@@ -1408,6 +1456,33 @@ export default function Home() {
         : [conversation, ...base.conversations],
     };
     commitWorkspace(next);
+  }
+
+  async function saveBackgroundConversation(paperId: string, conversation?: Conversation, removeId?: string) {
+    const previous = backgroundSaveQueuesRef.current.get(paperId) ?? Promise.resolve();
+    const saving = previous.catch(() => {}).then(async () => {
+      await saveWorkspaceDebouncer.flush();
+      if (paperIdRef.current === paperId) {
+        if (conversation) updateConversation(conversation);
+        else commitWorkspace({ ...workspaceRef.current, conversations: workspaceRef.current.conversations.filter((item) => item.id !== removeId) });
+        return;
+      }
+      const stored = await getWorkspace(paperId);
+      const id = conversation?.id ?? removeId;
+      const next = { ...stored, conversations: conversation
+        ? [...stored.conversations.filter((item) => item.id !== id), conversation]
+        : stored.conversations.filter((item) => item.id !== id) };
+      if (paperIdRef.current === paperId) {
+        if (conversation) updateConversation(conversation);
+        else commitWorkspace({ ...workspaceRef.current, conversations: workspaceRef.current.conversations.filter((item) => item.id !== removeId) });
+      } else {
+        await saveWorkspace(paperId, next);
+      }
+    });
+    backgroundSaveQueuesRef.current.set(paperId, saving);
+    try { await saving; } finally {
+      if (backgroundSaveQueuesRef.current.get(paperId) === saving) backgroundSaveQueuesRef.current.delete(paperId);
+    }
   }
 
   function changeConversationColor(conversation: Conversation, color: HighlightColor) {
@@ -1474,12 +1549,45 @@ export default function Home() {
       : providerLabelFor(modelProvider);
   const activeModelLabel = allModels.find((item) => item.id === modelId)?.label ?? "模型";
 
+  /**
+   * 联网检索：只把用户提问发给搜索服务商，论文正文不会离开本机。
+   * 任何失败都降级为「不联网回答」，不阻断提问。
+   */
+  async function runWebSearch(query: string): Promise<WebSearchSource[]> {
+    try {
+      const response = await fetch("/api/web-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        results?: WebSearchSource[];
+        error?: string;
+      };
+      if (!data.ok) {
+        setNotice(`${data.error ?? "联网检索失败。"}（本次按未联网方式回答）`);
+        return [];
+      }
+      const results = Array.isArray(data.results) ? data.results : [];
+      if (!results.length) {
+        setNotice("联网检索没有返回网页结果，本次按未联网方式回答。");
+        return [];
+      }
+      return results;
+    } catch {
+      setNotice("联网检索失败：无法连接本机检索接口（本次按未联网方式回答）。");
+      return [];
+    }
+  }
+
   async function streamResponse(
     task: PromptKind | ArtifactKind,
     taskQuestion: string,
     context: string,
     history: Array<{ role: "user" | "assistant"; content: string }> = [],
     onText: (content: string) => void,
+    webSources: WebSearchSource[] = [],
   ) {
     const run = async () => {
       // API Key 由服务端直接从 data/apikey.txt 读取，客户端不再随请求发送密钥。
@@ -1493,7 +1601,9 @@ export default function Home() {
           task,
           context,
           question: taskQuestion,
-          messages: history.slice(-10).map((message) => ({ role: message.role, content: message.content })),
+          messages: history.slice(-HISTORY_MESSAGE_LIMIT).map((message) => ({ role: message.role, content: message.content })),
+          // 未联网时不带该字段，请求体与接入联网功能之前完全一致。
+          ...(webSources.length ? { webSources } : {}),
         }),
       });
       if (!response.ok || !response.body) {
@@ -1509,13 +1619,19 @@ export default function Home() {
         content += decoder.decode(value, { stream: true });
         onText(content);
       }
+      if (!content.trim()) throw new Error("模型返回了空回复，请重试。");
       return content;
     };
     // GLM 的单任务限制由调用方在 startKind 前统一拦截；这里所有 provider 都直接运行。
     return run();
   }
 
-  async function sendQuestion(kind: PromptKind, forcedQuestion?: string, overrideAnchors?: TextAnchor[]) {
+  async function sendQuestion(
+    kind: PromptKind,
+    forcedQuestion?: string,
+    overrideAnchors?: TextAnchor[],
+    options?: { preservePendingColor?: boolean },
+  ) {
     if (!paper) return;
     setPanelCleared(false);
     const activeApiKey = currentModelApiKey();
@@ -1547,61 +1663,28 @@ export default function Home() {
     }
     // 提问前先把最新 API Key 写回文件（服务端从 data/apikey.txt 读取）。
     await persistApiKeys();
+    if (paperIdRef.current !== paper.id) return;
+    // 联网检索（可选）：只把提问原文发给搜索服务商，论文正文不发送；
+    // 自动模式下翻译/笔记/脑图/写作分析永远不联网。
+    let webSources: WebSearchSource[] = [];
+    if (shouldSearchWeb(kind, finalQuestion, webSearchMode)) {
+      setNotice("正在联网检索…");
+      webSources = await runWebSearch(finalQuestion);
+      if (paperIdRef.current !== paper.id) return;
+    }
     const now = new Date().toISOString();
-    const isContextRequest = kind === "context";
     const baseConversations = workspaceRef.current.conversations;
-    // 同一段原文 + 相同的提问内容 → 复用已有会话（覆盖旧记录，避免重复）。
-    // 匹配顺序：选区/锚点身份 → 内容+问题 → 当前活动会话。
-    const currentQuote = selectionAnchors[0] ? normalizedQuote(selectionAnchors[0].quote) : "";
-    const fallbackByContent = !currentQuote
-      ? undefined
-      : baseConversations.find((candidate) => {
-          const hasSameQuestion = candidate.turns.some(
-            (turn) =>
-              turn.role === "user" &&
-              turn.kind === kind &&
-              turn.content === finalQuestion &&
-              turnQuote(turn) === currentQuote,
-          );
-          return hasSameQuestion;
-        });
-    const activeById = baseConversations.find((conversation) => conversation.id === activeConversationId);
-    const baseConversation =
-      (isContextRequest
-        ? baseConversations.find(
-            (conversation) =>
-              conversation.scope === "context" &&
-              conversationMatchesSelection(conversation, selectionGroup, selectionAnchor),
-          )
-        : baseConversations.find(
-            (conversation) =>
-              isNormalScope(conversation) &&
-              conversationMatchesSelection(conversation, selectionGroup, selectionAnchor),
-          )) ??
-      fallbackByContent ??
-      (isContextRequest
-        ? undefined
-        : activeById && isNormalScope(activeById)
-          ? activeById
-          : undefined);
-    const conversation = baseConversation ?? {
+    const baseConversation = selectionAnchors.length
+      ? baseConversations.find((conversation) => conversationMatchesSelection(conversation, selectionGroup, selectionAnchor))
+      : baseConversations.find((conversation) => conversation.id === activeConversationId && !conversation.anchor && !conversation.selection?.anchors.length);
+    const conversation: Conversation = baseConversation ?? {
       id: uid(),
       paperId: paper.id,
       anchor: selectionAnchor,
       selection: selectionGroup,
-      scope: isContextRequest ? "context" : "normal",
+      scope: "normal",
       color: pendingColor ?? defaultHighlightColor(baseConversations.length),
-      title: isContextRequest
-        ? selectionGroup
-          ? selectionGroup.anchors.length > 1
-            ? `全文上下文 · ${selectionGroup.anchors.length} 个片段`
-            : `全文上下文 · ${selectionGroup.anchors[0].section ?? `第 ${selectionGroup.anchors[0].page} 页`}`
-          : "全文上下文"
-        : selectionGroup
-          ? selectionGroup.anchors.length > 1
-            ? `${selectionGroup.anchors.length} 个片段问答`
-            : `${selectionGroup.anchors[0].section ?? `第 ${selectionGroup.anchors[0].page} 页`}选段`
-          : "全文问答",
+      title: selectionTitle(selectionGroup?.anchors ?? selectionAnchors),
       turns: [],
       updatedAt: now,
     };
@@ -1631,27 +1714,9 @@ export default function Home() {
       kind,
       anchor: selectionAnchor,
       selection: selectionGroup,
+      ...(webSources.length ? { sources: webSources } : {}),
     };
-    // 同内容快捷提问去重：会话中已存在"相同提问 + 相同原文"的记录时，
-    // 在原来的位置覆盖旧记录（用户问题与其后回答成对替换），不追加重复。
-    const existingTurnIndex = conversation.turns.findIndex(
-      (turn) =>
-        turn.role === "user" &&
-        turn.kind === kind &&
-        turn.content === finalQuestion &&
-        turnQuote(turn) === currentQuote,
-    );
-    const nextTurns =
-      existingTurnIndex >= 0
-        ? [
-            ...conversation.turns.slice(0, existingTurnIndex),
-            userTurn,
-            assistantTurn,
-            ...conversation.turns.slice(
-              existingTurnIndex + (conversation.turns[existingTurnIndex + 1]?.role === "assistant" ? 2 : 1),
-            ),
-          ]
-        : [...conversation.turns, userTurn, assistantTurn];
+    const nextTurns = [...conversation.turns, userTurn, assistantTurn];
     let currentConversation = {
       ...conversation,
       anchor: selectionAnchor,
@@ -1663,33 +1728,14 @@ export default function Home() {
     beginChat(currentConversation.id);
     updateConversation(currentConversation);
     setActiveConversationId(currentConversation.id);
-    setPendingColor(defaultHighlightColor(baseConversations.length + 1));
+    if (!options?.preservePendingColor) {
+      setPendingColor(defaultHighlightColor(baseConversations.length + 1));
+    }
     // 翻译是固定指令，不清空输入框里的草稿内容；其他提问发送后清空。
     if (kind !== "translate") setQuestion("");
-    beginChat(currentConversation.id);
-    const selectedContext = buildContext(paper.pages, selectionAnchors);
-    let historyMessages: Array<{ role: "user" | "assistant"; content: string }>;
-    let requestContext: string;
-    if (kind === "context") {
-      const hasContextTurn = conversation.turns.some(
-        (turn) => turn.role === "user" && turn.kind === "context",
-      );
-      if (hasContextTurn) {
-        historyMessages = buildContextHistoryMessages(conversation.turns, paperDigest);
-        requestContext = `[用户选中内容与相邻上下文]\n${selectedContext}`;
-      } else {
-        historyMessages = conversation.turns.map((turn) => ({ role: turn.role, content: turn.content }));
-        const digestPart = paperDigest.trim()
-          ? `[论文全文摘要与结构]\n${paperDigest}`
-          : "";
-        requestContext = [digestPart, `[用户选中内容与相邻上下文]\n${selectedContext}`]
-          .filter(Boolean)
-          .join("\n\n");
-      }
-    } else {
-      historyMessages = conversation.turns.map((turn) => ({ role: turn.role, content: turn.content }));
-      requestContext = selectedContext;
-    }
+    const { requestContext, historyMessages } = buildSelectionRequest(
+      kind, paper.pages, selectionAnchors, conversation.turns, paperDigest,
+    );
     try {
       await streamResponse(kind, finalQuestion, requestContext, historyMessages, (content) => {
         currentConversation = {
@@ -1698,7 +1744,11 @@ export default function Home() {
           updatedAt: new Date().toISOString(),
         };
         updateConversation(currentConversation);
-      });
+      }, webSources);
+      if (paperIdRef.current !== paper.id) {
+        await saveBackgroundConversation(paper.id, currentConversation).catch(() => setNotice("后台回复保存失败，请重新打开原论文检查。"));
+        return;
+      }
       // 回答完成后通知陪读小人：带上本次对话内容（原文选段 + 提问 + 回答），
       // 让小人结合对话内容聊天（翻译/问答场景）。
       const assistantReply =
@@ -1715,6 +1765,10 @@ export default function Home() {
       // 发送失败：不把失败内容写入对话——复用会话时恢复发送前的状态（含被覆盖的旧问答），
       // 新建的空会话整体移除；问题写回输入框，并弹出可复制的警示信息。
       const reason = error instanceof Error ? error.message : "未知错误";
+      if (paperIdRef.current !== paper.id) {
+        await saveBackgroundConversation(paper.id, baseConversation, conversation.id).catch(() => setNotice("后台问答清理失败，请重新打开原论文检查。"));
+        return;
+      }
       const latest = workspaceRef.current;
       const stillExists = latest.conversations.some((item) => item.id === conversation.id);
       if (stillExists && baseConversation) {
@@ -1736,6 +1790,21 @@ export default function Home() {
       endChat(currentConversation.id);
     }
   }
+
+  translateShortcutActionRef.current = () => {
+    if (!activeAnchors.length) {
+      setNotice("先在原版页面上划选一段原文。");
+      return;
+    }
+    void sendQuestion("translate");
+  };
+  toggleAutoTranslateShortcutActionRef.current = () => {
+    setAutoTranslate((current) => {
+      const next = !current;
+      setNotice(next ? "自动翻译已开启。" : "自动翻译已关闭。");
+      return next;
+    });
+  };
 
   async function generateArtifact(kind: ArtifactKind) {
     if (!paper) return;
@@ -2167,7 +2236,8 @@ export default function Home() {
             <p className="empty-library">还没有论文。首次导入后，文件和成果自动保存到本机数据库。</p>
           )}
         </section>
-        <SettingsSheet
+        <UpdateManager busy={runningKinds.size > 0} prepare={async () => { await Promise.all(backgroundSaveQueuesRef.current.values()); await saveWorkspaceDebouncer.flush(); await persistApiKeys(); }} />
+      <SettingsSheet
           open={settingsOpen}
           onClose={closeSettings}
           apiKey={apiKey}
@@ -2317,8 +2387,10 @@ export default function Home() {
               onChangeColor={changeConversationColor}
               contextMode={contextMode}
               onToggleContext={() => setContextMode((current) => !current)}
-              translateMode={translateMode}
-              onTranslateModeChange={setTranslateMode}
+              autoTranslate={autoTranslate}
+              onAutoTranslateChange={setAutoTranslate}
+              webSearchMode={webSearchMode}
+              onCycleWebSearch={cycleWebSearchMode}
               onPrompt={(kind) => void sendQuestion(kind)}
               onSelectConversation={selectConversation}
               onDeleteTurn={deleteConversationTurn}
@@ -2348,6 +2420,7 @@ export default function Home() {
         )}
       </div>
       {buddyVisible && <BuddySystem noteCount={workspace.conversations.length} />}
+      <UpdateManager busy={runningKinds.size > 0} prepare={async () => { await Promise.all(backgroundSaveQueuesRef.current.values()); await saveWorkspaceDebouncer.flush(); await persistApiKeys(); }} />
       <SettingsSheet
         open={settingsOpen}
         onClose={closeSettings}
@@ -2685,7 +2758,21 @@ function ModelSwitch({ models, modelId, onChange, mode, onModeChange }: {
   );
 }
 
-function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, translateMode, onTranslateModeChange, onPrompt, onSelectConversation, onDeleteTurn, provider, mode, modelLabel }: {
+/** 统一的外链渲染：一律新标签打开；联网角标（[1] 这类纯数字链接）加专属样式。 */
+function MarkdownLink({ node, children, ...rest }: { node?: unknown; children?: ReactNode; href?: string; title?: string; className?: string }) {
+  void node;
+  const text = typeof children === "string" ? children : Array.isArray(children) && children.length === 1 ? String(children[0]) : "";
+  const isCitation = /^\d{1,2}$/.test(text.trim());
+  return (
+    <a {...rest} target="_blank" rel="noreferrer" className={isCitation ? "md-cite" : undefined}>
+      {children}
+    </a>
+  );
+}
+
+const MARKDOWN_COMPONENTS = { a: MarkdownLink };
+
+function ChatPanel({ anchors, selectionGroup, conversation, conversations, activeConversationId, question, setQuestion, generating, pendingColor, onPendingColorChange, onChangeColor, contextMode, onToggleContext, autoTranslate, onAutoTranslateChange, webSearchMode, onCycleWebSearch, onPrompt, onSelectConversation, onDeleteTurn, provider, mode, modelLabel }: {
   anchors?: TextAnchor[];
   selectionGroup?: SelectionGroup;
   conversation?: Conversation;
@@ -2699,8 +2786,10 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   onChangeColor: (conversation: Conversation, color: HighlightColor) => void;
   contextMode: boolean;
   onToggleContext: () => void;
-  translateMode: boolean;
-  onTranslateModeChange: (value: boolean) => void;
+  autoTranslate: boolean;
+  onAutoTranslateChange: (value: boolean) => void;
+  webSearchMode: WebSearchMode;
+  onCycleWebSearch: () => void;
   onPrompt: (kind: PromptKind) => void;
   onSelectConversation: (conversation: Conversation) => void;
   onDeleteTurn: (conversation: Conversation, turnId: string) => void;
@@ -2709,16 +2798,62 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   modelLabel: string;
 }) {
   const historyRef = useRef<HTMLDivElement>(null);
+  const followingLatestRef = useRef(true);
+  const lastHistoryConversationIdRef = useRef<string | undefined>(undefined);
   const [focusRequest, setFocusRequest] = useState<{ turnId: string; nonce: number }>();
   const [selectionExpanded, setSelectionExpanded] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   // 提问索引只高亮"当前对话记录框中显示的那一条"，而不是整个会话的全部记录。
   const [activeTurnId, setActiveTurnId] = useState<string>();
+
+  const updateJumpToLatest = useCallback(() => {
+    const history = historyRef.current;
+    if (!history) return;
+    const distanceFromBottom = history.scrollHeight - history.scrollTop - history.clientHeight;
+    followingLatestRef.current = distanceFromBottom <= 72;
+    setShowJumpToLatest(!followingLatestRef.current);
+  }, []);
+
   useEffect(() => {
-    const lastUserTurn = [...(conversation?.turns ?? [])]
-      .reverse()
-      .find((turn) => turn.role === "user");
-    setActiveTurnId(lastUserTurn?.id);
-  }, [conversation?.id, conversation?.turns.length]);
+    const history = historyRef.current;
+    if (!history) return;
+    const handleScroll = () => updateJumpToLatest();
+    history.addEventListener("scroll", handleScroll, { passive: true });
+    const frame = window.requestAnimationFrame(handleScroll);
+    return () => {
+      history.removeEventListener("scroll", handleScroll);
+      window.cancelAnimationFrame(frame);
+    };
+  }, [updateJumpToLatest]);
+
+  useEffect(() => {
+    const conversationChanged = lastHistoryConversationIdRef.current !== conversation?.id;
+    lastHistoryConversationIdRef.current = conversation?.id;
+    if (conversationChanged) followingLatestRef.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      const history = historyRef.current;
+      if (!history) return;
+      if (followingLatestRef.current) {
+        history.scrollTop = history.scrollHeight;
+        setShowJumpToLatest(false);
+        return;
+      }
+      updateJumpToLatest();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [conversation?.id, conversation?.turns, updateJumpToLatest]);
+
+  function jumpToLatest() {
+    const history = historyRef.current;
+    if (!history) return;
+    followingLatestRef.current = true;
+    setShowJumpToLatest(false);
+    history.scrollTo({ top: history.scrollHeight, behavior: "smooth" });
+  }
+
+  useEffect(() => {
+    setActiveTurnId((current) => activeIndexTurn(conversation?.turns ?? [], current));
+  }, [conversation?.id, conversation?.turns]);
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -2763,7 +2898,7 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
   const colorMode = conversation ? "会话" : "下一次提问";
 
   return <div className="chat-panel">
-    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后会自动带上上下文"}</p></div><span className="chat-model-chip">{modelLabel}{mode === "deep" ? " · 思考" : ""}</span></div>
+    <div className="panel-heading"><span className="panel-icon"><Bot size={17} /></span><div><h2>和论文聊一聊</h2><p>{selectionAnchors.length ? `当前选区 · ${selectionAnchors.length} 个片段` : "可自由提问，划选原文后可继续对话"}</p></div><span className="chat-model-chip">{modelLabel}{mode === "deep" ? " · 思考" : ""}</span></div>
     <details className="question-index">
       <summary><MessageCircleMore size={14} /> 提问索引 <b>{indexItems.length}</b></summary>
       {indexItems.length ? (
@@ -2782,11 +2917,14 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
                   {item.turn.selection?.anchors.length
                     ? `p.${[...new Set(item.turn.selection.anchors.map((entry) => entry.page))].join("/")}`
                     : `p.${item.conversation.anchor?.page ?? "全"}`}
-                  {item.turn.kind === "context" || item.conversation.scope === "context" ? (
+                  {item.turn.kind === "context" ? (
                     <span className="index-badge">全文</span>
                   ) : null}
+                  {item.turn.kind === "translate" ? (
+                    <span className="index-badge">翻译</span>
+                  ) : null}
                 </span>
-                <p>{item.turn.content}</p>
+                <p>{item.turn.kind === "translate" ? translationIndexText(item.turn, item.conversation) : item.turn.content}</p>
                 <time>{readableDate(item.turn.createdAt)}</time>
               </button>
               <button
@@ -2869,56 +3007,83 @@ function ChatPanel({ anchors, selectionGroup, conversation, conversations, activ
         ))}
       </div>
     </div>
-    <div className="chat-history" ref={historyRef} aria-live="polite">
-      {conversation?.turns.length ? conversation.turns.map((turn) => (
-        <div key={turn.id} data-turn-id={turn.id} className={`chat-turn ${turn.role}`}>
-          <span>{turn.role === "user" ? "你" : "PaperMate"}</span>
-          {turn.role === "user" ? (
-            <div>{turn.content}</div>
-          ) : (
-            <div className="md-body">
-              {turn.content ? (
-                <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                  {turn.content}
-                </ReactMarkdown>
-              ) : <LoaderCircle className="spin" size={15} />}
-            </div>
-          )}
-          {turn.role === "assistant" ? (
-            <small>{turn.kind === "context" ? "全文上下文 · " : ""}{turn.selection?.anchors.length ? `依据第 ${[...new Set(turn.selection.anchors.map((entry) => entry.page))].join("、")} 页共 ${turn.selection.anchors.length} 个片段` : turn.anchor ? `依据第 ${turn.anchor.page} 页选段` : ""}</small>
-          ) : null}
-        </div>
-      )) : <div className="chat-empty"><CircleHelp size={22} /><p>选中一句话，或提出关于整篇论文的问题。</p></div>}
+    <div className="chat-history-shell">
+      <div className="chat-history" ref={historyRef} aria-live="polite">
+        {conversation?.turns.length ? conversation.turns.map((turn) => (
+          <div key={turn.id} data-turn-id={turn.id} className={`chat-turn ${turn.role}`}>
+            <span>{turn.role === "user" ? "你" : "PaperMate"}</span>
+            {turn.role === "user" ? (
+              <div>{turn.content}</div>
+            ) : (
+              <div className="md-body">
+                {turn.content ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
+                    {linkifyCitations(turn.content, turn.sources ?? [])}
+                  </ReactMarkdown>
+                ) : <LoaderCircle className="spin" size={15} />}
+              </div>
+            )}
+            {turn.role === "assistant" ? (
+              <small>{turn.kind === "context" ? "全文上下文 · " : ""}{turn.selection?.anchors.length ? `依据第 ${[...new Set(turn.selection.anchors.map((entry) => entry.page))].join("、")} 页共 ${turn.selection.anchors.length} 个片段` : turn.anchor ? `依据第 ${turn.anchor.page} 页选段` : ""}{turn.sources?.length ? `${turn.kind === "context" || turn.selection?.anchors.length || turn.anchor ? " · " : ""}已联网检索 ${turn.sources.length} 条` : ""}</small>
+            ) : null}
+            {turn.role === "assistant" && turn.content && turn.sources?.length ? (
+              <div className="chat-sources">
+                <span className="chat-sources-title">联网来源 · {turn.sources.length} 条</span>
+                <ol>
+                  {turn.sources.map((source) => (
+                    <li key={source.id} value={source.id}>
+                      <a href={source.url} target="_blank" rel="noreferrer" title={source.url}>{source.title}</a>
+                      {(source.site || source.publishedAt) && <small>{[source.site, source.publishedAt].filter(Boolean).join(" · ")}</small>}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+          </div>
+        )) : <div className="chat-empty"><CircleHelp size={22} /><p>选中一句话，或提出关于整篇论文的问题。</p></div>}
+      </div>
+      {showJumpToLatest ? (
+        <button
+          type="button"
+          className="chat-jump-latest"
+          aria-label="跳到最新问答"
+          title="跳到最新问答"
+          onClick={jumpToLatest}
+        >
+          <ChevronDown size={13} />
+          <span>回到最新</span>
+        </button>
+      ) : null}
     </div>
     <div className="quick-prompts">
       <button
         disabled={generating}
-        className={translateMode ? "active" : ""}
-        aria-pressed={translateMode}
-        title="开启后划选新内容自动翻译；有选区时点击立即翻译当前选区，无选区时再点关闭"
-        onClick={() => {
-          if (!translateMode) {
-            onTranslateModeChange(true);
-            // 已有选区时点击翻译：立即翻译，并保持翻译模式选中。
-            if (selectionAnchors.length) onPrompt("translate");
-          } else if (selectionAnchors.length) {
-            // 模式已开启且有选区：点击即翻译当前选区，模式保持开启。
-            onPrompt("translate");
-          } else {
-            // 无选区时再点：关闭翻译模式。
-            onTranslateModeChange(false);
-          }
-        }}
+        title="翻译当前选区 · Alt+T"
+        onClick={() => onPrompt("translate")}
       >翻译</button>
+      <button
+        className={autoTranslate ? "active" : ""}
+        aria-pressed={autoTranslate}
+        title="划选后立即翻译 · Alt+Shift+T 开关"
+        onClick={() => onAutoTranslateChange(!autoTranslate)}
+      >自动翻译</button>
       <button
         disabled={generating}
         className={contextMode ? "active" : ""}
         aria-pressed={contextMode}
         onClick={onToggleContext}
       >结合上下文解释</button>
+      <button
+        className={`websearch-toggle ${webSearchMode !== "off" ? "active" : ""}`}
+        aria-pressed={webSearchMode !== "off"}
+        aria-label={WEB_SEARCH_MODE_LABELS[webSearchMode].title}
+        data-mode={webSearchMode}
+        title={WEB_SEARCH_MODE_LABELS[webSearchMode].title}
+        onClick={onCycleWebSearch}
+      ><Search size={11} />{WEB_SEARCH_MODE_LABELS[webSearchMode].button}</button>
     </div>
-    <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onPrompt(contextMode ? "context" : "free"); } }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
-    <p className="input-hint">{translateMode ? "翻译模式已开启 · 划选新内容自动翻译 · 点击已问答段落仅查看历史（点「翻译」翻译当前选区）" : contextMode ? "全文上下文已开启 · 以你的问题为核心结合全文回答" : "Enter 发送 · Shift + Enter 换行 · 回答优先依据论文原文"}</p>
+    <div className="question-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={webSearchMode === "off" ? "输入你的问题…" : "输入你的问题…（本次会联网检索）"} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); onPrompt(contextMode ? "context" : "free"); } }} /><button disabled={generating || !question.trim()} aria-label="发送问题" onClick={() => onPrompt(contextMode ? "context" : "free")}><SendHorizonal size={17} /></button></div>
+    <p className="input-hint">{webSearchMode === "off" ? (autoTranslate ? "自动翻译已开启 · 仅翻译本次新划选，不追加上一选区 · Alt+Shift+T 关闭" : contextMode ? "全文上下文已开启 · Alt+T 翻译选区 · 以你的问题为核心结合全文回答" : "Alt+T 翻译 · Alt+Shift+T 自动翻译 · Enter 发送") : "联网检索已开启 · 只发送提问原文，不发送论文正文 · 翻译/笔记/脑图/写作分析仍不联网"}</p>
   </div>;
 }
 
@@ -3019,7 +3184,7 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, 
       {kind === "mindmap" && svg && <div className="mindmap-preview" dangerouslySetInnerHTML={{ __html: svg }} />}
       {viewingVersion ? (
         <div className="artifact-md md-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
             {viewingVersion.content}
           </ReactMarkdown>
         </div>
@@ -3028,7 +3193,7 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, 
       ) : (
         <div className="artifact-md md-body">
           {artifact?.content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
               {artifact.content}
             </ReactMarkdown>
           ) : <LoaderCircle className="spin" size={16} />}
@@ -3036,6 +3201,221 @@ function ArtifactPanel({ kind, paper, artifact, generating, onGenerate, onEdit, 
       )}
     </>}
   </div>;
+}
+
+/** 设置页「联网搜索」区块：服务商 / Key / 参数 / 测试连接；配置保存到本机 data/search.json。 */
+function WebSearchSettingsSection() {
+  const [config, setConfig] = useState<WebSearchConfigView | null>(null);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [clearKey, setClearKey] = useState(false);
+  const [busy, setBusy] = useState<"idle" | "saving" | "testing">("idle");
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/storage/search")
+      .then((response) => response.json())
+      .then((data: { config?: WebSearchConfigView }) => {
+        if (alive && data.config) setConfig(data.config);
+      })
+      .catch(() => {
+        if (alive) setResult({ ok: false, message: "无法读取联网搜索配置。" });
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const patch = (next: Partial<WebSearchConfigView>) =>
+    setConfig((current) => (current ? { ...current, ...next } : current));
+
+  /** 先保存再测试，保证测到的就是即将生效的配置。 */
+  async function save(): Promise<boolean> {
+    if (!config) return false;
+    setBusy("saving");
+    setResult(null);
+    try {
+      const response = await fetch("/api/storage/search", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: {
+            provider: config.provider,
+            endpoint: config.endpoint,
+            count: config.count,
+            engine: config.engine,
+            recency: config.recency,
+            contentSize: config.contentSize,
+            // 留空 = 保持已保存的 Key；只有勾选“清除”才显式传空串。
+            apiKey: clearKey ? "" : keyDraft.trim() ? keyDraft.trim() : undefined,
+          },
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        config?: WebSearchConfigView;
+      };
+      if (!response.ok || !data.ok) {
+        setResult({ ok: false, message: data.error ?? "联网搜索配置保存失败。" });
+        setBusy("idle");
+        return false;
+      }
+      if (data.config) setConfig(data.config);
+      setKeyDraft("");
+      setClearKey(false);
+      setBusy("idle");
+      setResult({ ok: true, message: "已保存到本机 data/search.json。" });
+      return true;
+    } catch {
+      setResult({ ok: false, message: "保存失败：无法连接本机服务。" });
+      setBusy("idle");
+      return false;
+    }
+  }
+
+  async function test() {
+    const saved = await save();
+    if (!saved) return;
+    setBusy("testing");
+    setResult(null);
+    try {
+      const response = await fetch("/api/web-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ test: true }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        results?: unknown[];
+        error?: string;
+        tookMs?: number;
+        rawSnippet?: string;
+      };
+      if (!data.ok) {
+        setResult({
+          ok: false,
+          message: `${data.error ?? "检索失败。"}${data.rawSnippet ? ` 原始返回：${data.rawSnippet.slice(0, 160)}` : ""}`,
+        });
+      } else {
+        const count = Array.isArray(data.results) ? data.results.length : 0;
+        setResult({
+          ok: count > 0,
+          message: count > 0 ? `连接成功，命中 ${count} 条（${data.tookMs ?? 0} ms）。` : "接口连通，但这次没有返回网页结果。",
+        });
+      }
+    } catch {
+      setResult({ ok: false, message: "测试失败：无法连接本机检索接口。" });
+    } finally {
+      setBusy("idle");
+    }
+  }
+
+  const meta = SEARCH_PROVIDER_META.find((item) => item.id === config?.provider);
+  const disabled = busy !== "idle";
+
+  return (
+    <section className="settings-block">
+      <div className="settings-block-head">
+        <span className="settings-kicker">WEB SEARCH</span>
+        <h3>联网搜索</h3>
+        <p>提问时可以先把公开网页作为补充证据检索回来，回答里用 [1][2] 角标标注来源。配置明文保存在本机 data/search.json，不进备份、不提交仓库。</p>
+      </div>
+      {!config ? (
+        <p className="key-result">正在读取配置…</p>
+      ) : (
+        <div className="settings-websearch">
+          <div className="settings-websearch-grid">
+            <label>搜索服务
+              <select
+                value={config.provider}
+                onChange={(event) => {
+                  const provider = event.target.value as WebSearchConfigView["provider"];
+                  // 换离自定义来源时清掉接口地址，否则保存会被校验拦下。
+                  patch(provider === "custom" ? { provider } : { provider, endpoint: "" });
+                }}
+              >
+                {SEARCH_PROVIDER_META.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>{config.provider === "zhipu" ? "搜索专用 API Key（可选）" : "搜索 API Key"}
+              <input
+                type="password"
+                value={keyDraft}
+                onChange={(event) => setKeyDraft(event.target.value)}
+                placeholder={config.hasKey ? "已保存，留空则不变" : config.usingGlmKey ? "留空则复用上方智谱 API Key" : "sk-…"}
+                autoComplete="off"
+              />
+            </label>
+            {config.provider === "custom" && (
+              <label>接口地址
+                <input
+                  value={config.endpoint}
+                  onChange={(event) => patch({ endpoint: event.target.value })}
+                  placeholder="https://example.com/v1/web-search"
+                  autoComplete="off"
+                />
+              </label>
+            )}
+            {config.provider === "zhipu" && (
+              <label>搜索引擎
+                <select value={config.engine} onChange={(event) => patch({ engine: event.target.value as WebSearchConfigView["engine"] })}>
+                  {ZHIPU_SEARCH_ENGINES.map((item) => (
+                    <option key={item.id} value={item.id}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label>结果条数
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={config.count}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  patch({ count: Number.isFinite(value) ? Math.min(20, Math.max(1, Math.round(value))) : config.count });
+                }}
+              />
+            </label>
+            <label>时间范围
+              <select value={config.recency} onChange={(event) => patch({ recency: event.target.value as WebSearchConfigView["recency"] })}>
+                {WEB_SEARCH_RECENCY_OPTIONS.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>摘要长度
+              <select value={config.contentSize} onChange={(event) => patch({ contentSize: event.target.value as WebSearchConfigView["contentSize"] })}>
+                {WEB_SEARCH_CONTENT_SIZE_OPTIONS.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {meta && <p className="settings-hint">{meta.hint}</p>}
+          {config.hasKey && (
+            <label className="settings-checkbox">
+              <input type="checkbox" checked={clearKey} onChange={(event) => setClearKey(event.target.checked)} />
+              清除已保存的搜索专用 Key
+            </label>
+          )}
+          <div className="settings-websearch-actions">
+            <button className="test-key" disabled={disabled} onClick={() => void save()}>
+              {busy === "saving" ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}保存配置
+            </button>
+            <button className="test-key" disabled={disabled} onClick={() => void test()}>
+              {busy === "testing" ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}测试连接
+            </button>
+          </div>
+          {result && <p className={`key-result ${result.ok ? "good" : "bad"}`}>{result.message}</p>}
+          <p className="settings-hint">隐私：检索时只把提问原文发给搜索服务商，论文正文不会离开本机。聊天面板里的联网开关默认关闭，翻译 / 笔记 / 脑图 / 写作分析永不联网。</p>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApiKey, setGlmApiKey, glmState, onTestGlm, kimiApiKey, setKimiApiKey, kimiState, onTestKimi, theme, onThemeChange, backupState, backupSavedAt, backupFilePath, onBackupNow, onRestoreBackup, onExportBackup, onImportBackup, onCopyPath, customModels, onSaveCustomModel, onDeleteCustomModel, onTestCustomModel }: {
@@ -3215,6 +3595,7 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
           </div>
           <div className="settings-layout">
             <div className="settings-layout-main">
+              <CheckUpdateButton />
               <section className="settings-block">
                 <div className="settings-block-head">
                   <span className="settings-kicker">MODEL PROVIDERS</span>
@@ -3245,6 +3626,7 @@ function SettingsSheet({ open, onClose, apiKey, setApiKey, state, onTest, glmApi
                   </section>
                 </div>
               </section>
+              <WebSearchSettingsSection />
               <section className="settings-theme-section">
                 <span className="settings-kicker">READING THEME</span>
                 <h3>阅读主题</h3>

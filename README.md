@@ -45,7 +45,9 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 
 - Chat about the selected passage or ask about the whole paper; the current selection is attached as context automatically.
 - One-click prompts: translate the selection, or explain it with the full paper as context.
-- Free-form questions can be sent with `Ctrl`/`Cmd` + Enter.
+- **Smart translation with auto-translate**: `Alt`+`T` translates the current selection; `Alt`+`Shift`+`T` toggles **自动翻译**, which translates each newly selected passage automatically (a fresh single-fragment session each time, never merged with the previous selection). Selecting a sentence or paragraph also returns a short grammar explanation, while multi-fragment selections are labelled `# 1`/`# 2`.
+- **Web search (联网搜索)**: a three-state switch — off, auto (searches only when the question is about external facts, recency, tools, products, prices, or versions), and force (search on every question). Results come back as numbered sources with clickable citation badges. Search runs as a standalone service decoupled from the chat model, so DeepSeek, GLM, Kimi, and custom models can all use it; only your question text is sent to the search provider and the paper body never leaves your machine. Any failure degrades gracefully to an offline answer instead of blocking the question. Providers: Zhipu (with `search_std` / `search_pro` / `search_pro_sogou` / `search_pro_quark` engines), Bocha, Tavily, or a custom endpoint; a custom `[websearch]` block in `public/prompts.txt` controls the citation rules.
+- Free-form questions can be sent with `Ctrl`/`Cmd` + Enter; `Enter` sends and `Shift`+`Enter` makes a new line (IME composition is not intercepted).
 - Two answer modes: `Flash` for fast translation and routine questions, `MAX 思考` for deeper explanation, summarization, and writing analysis.
 - Three providers: DeepSeek, Zhipu GLM, and Kimi (`kimi-k2.6`); each has its own API key and connection test. GLM offers two tiers, `glm-4-flash` (free, officially supports high concurrency) and `glm-4.7-flash`, used as fallbacks for each other. DeepSeek and Kimi support concurrent conversations; the free GLM tier stays single-task.
 - Model system: four built-in models (GLM-4-Flash, GLM-4.7-Flash, DeepSeek, Kimi), plus custom models added in settings (OpenAI-compatible chat/completions with custom base URL, model name, and API key; freely add/edit/delete). The quick/deep buttons only toggle the thinking switch.
@@ -67,6 +69,7 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 - The database saves automatically; complete JSON backups are manual: backup now, restore from disk, export a backup file, and import one on another machine.
 - The settings panel shows and copies the backup file path.
 - API keys are stored separately in `data/apikey.txt` on this machine (plain text; `data/` is not committed to Git) and can be added/edited/deleted from the settings panel.
+- Custom model configurations (including API keys) live in `data/models.json`, and the web-search configuration lives in `data/search.json`, on this machine (plain text; `data/` is not committed to Git) and are not included in backups or exports.
 - `data/`, `.env*`, and `papermate-backup-*.json` are ignored by `.gitignore`, so your papers, API keys, and exported backups are never pushed to GitHub accidentally.
 
 ### Windows One-Click Install / Update / Uninstall
@@ -74,6 +77,17 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 - Fresh install: choose an install location; the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
 - Update: running `一键安装.bat` again detects the installed version and updates it incrementally (skipping copy and rebuild when the source is unchanged) while preserving the `data` folder.
 - Uninstall: available from the Start menu, install directory, or Windows Settings; the `data` directory is preserved by default.
+
+### In-App Auto Update
+
+- Checks GitHub **formal releases** in the background and only pops up when a newer version exists, so opening a paper is never blocked. Automatic checks run at most once every 6 hours; the manual "Check for updates" button is never throttled.
+- Shows the current version, the new version and its release notes, with "Update now" / "Later"; the settings page offers a manual check and always reports the real result (a failed check is never dressed up as "already up to date").
+- **Never calls api.github.com**: the unauthenticated API allows only 60 requests per hour, which shared egress IPs exhaust quickly (users then see "rate limit exceeded" and cannot update at all). Detection uses the plain github.com `/releases/latest` redirect — same "latest" semantics as the API, drafts and pre-releases excluded — plus the `/releases.atom` feed for release notes; the API is only a last-resort fallback.
+- Downloads a prebuilt Windows package that bundles its own Node runtime — no dependency install or build on the user's machine — with a progress bar and SHA-256 verification against the checksum published with the release.
+- Waits for in-flight translations, questions and saves to finish before installing, and pauses new model requests during the swap.
+- A standalone helper stops the service, backs up the whole previous installation, swaps program files, health-checks the new version and **rolls back automatically** on failure, reporting the reason.
+- User data is preserved: papers, notes, conversations, API keys, model config and customized prompts (`public/prompts.txt`, `public/quotes.txt`). Only program files are replaced.
+- A source checkout (contains `.git`, or not registered as an installed copy) can only check and report versions; it never overwrites itself, so local edits stay intact.
 
 ## Requirements
 
@@ -113,7 +127,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 | ![Library home](截图/首页.png) | Paper library: import PDFs, search, notes, pin-to-top and drag reordering, and backup status. |
 | ![Reading and selection](截图/辅助阅读.png) | Original-page reader: one-click chapter outline jumps, "拾句" random quotes, and a transparent text layer for precise selection. |
 | ![Q&A](截图/问答.png) | Selected passage with multi-turn Q&A: translation, context explanation, detailed explanation, and a question index to jump back. |
-| ![Settings](截图/设置.png) | Settings: DeepSeek / GLM / Kimi connection tests, reading themes, and local backup management. |
+| ![Settings](截图/设置.png) | Settings: DeepSeek / GLM / Kimi connection tests, custom model management, web-search configuration, reading themes, and local backup management. |
 | ![Reading notes](截图/阅读笔记.png) | Reading notes with page-referenced evidence. |
 | ![Mind map](截图/论文脑图.png) | Collapsible argument-structure mind map. |
 | ![Writing analysis](截图/写作思路.png) | Writing-strategy analysis with reusable paragraph and sentence frameworks. |
@@ -144,7 +158,7 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 - Only searchable PDFs with a text layer are supported; scanned PDFs and OCR are not supported.
 - DOCX and other document formats are not supported.
 - There is no account system or cloud sync; all data is stored locally.
-- Model requests depend on a valid DeepSeek, Zhipu GLM, or Kimi API key and network access.
+- Model requests depend on a valid DeepSeek, Zhipu GLM, Kimi, or custom-model API key and network access; web search additionally needs a search-provider key (or a Zhipu key, which is reused by default).
 
 ## Project Structure
 

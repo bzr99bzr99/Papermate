@@ -189,6 +189,7 @@ export function openStorage(options: {
       note TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      last_read_at TEXT,
       page_count INTEGER NOT NULL DEFAULT 0,
       original_ready INTEGER NOT NULL DEFAULT 0,
       pinned INTEGER NOT NULL DEFAULT 0,

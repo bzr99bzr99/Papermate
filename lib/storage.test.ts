@@ -329,6 +329,22 @@ describe("SQLite paper storage", () => {
     ]);
   });
 
+  it("records reading time and preserves it across later metadata saves", () => {
+    const dir = tempDir();
+    storage = openStorage({ dbPath: path.join(dir, "paper.db") });
+    const paper = makePaper("read-paper", "hash-read", "Read Paper");
+    storage.savePaper(paper);
+
+    const lastReadAt = storage.markPaperRead(paper.id);
+    expect(Number.isFinite(Date.parse(lastReadAt))).toBe(true);
+    expect(storage.listPaperMetas()[0].lastReadAt).toBe(lastReadAt);
+    expect(storage.getPaper(paper.id)?.lastReadAt).toBe(lastReadAt);
+
+    storage.savePaper({ ...paper, title: "Updated title" });
+    expect(storage.getPaper(paper.id)?.lastReadAt).toBe(lastReadAt);
+    expect(storage.buildBackup().papers[0].lastReadAt).toBe(lastReadAt);
+  });
+
   it("roundtrips pinned state through backup", () => {
     const dir = tempDir();
     storage = openStorage({ dbPath: path.join(dir, "paper.db") });

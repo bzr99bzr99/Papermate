@@ -14,14 +14,19 @@ The installer does not modify the original project folder when you choose a sepa
 
 ## Upgrading
 
-`一键安装.bat` handles both fresh installs and upgrades; there is no separate upgrade script:
+Double-click `一键升级.bat` in the project root to update an existing installation from the current project source:
 
-- Fresh install: the location picker appears and the installer copies the project to the chosen folder.
-- Existing install: the installer reads `%LOCALAPPDATA%\PaperMate\config.json`, skips the location picker, and upgrades the existing installation in place.
-- The upgrade stops any running PaperMate service, overwrites the install folder with the latest source, reinstalls dependencies, rebuilds the production app, and refreshes launchers, shortcuts, and the Windows app-list version.
-- The installed `data` folder is preserved, including `papermate.db`, WAL/SHM files, and `papermate-backup.json`.
+- Reads the install location, port, and shortcut settings from `%LOCALAPPDATA%\PaperMate\config.json`.
+- Stops the running PaperMate service before copying new source files.
+- **Incremental update - only what changed is touched**:
+  - The installer fingerprints the source (path, size, and last-write time). If nothing changed since the last install, it skips the project copy, dependency install, and build - the upgrade finishes in seconds.
+  - When the source did change, only the changed files are copied, not the whole project.
+  - `npm install` is skipped when `package.json` / `package-lock.json` are unchanged, reusing the existing `node_modules`.
+  - The production build only runs when it is actually needed.
+- Refreshes launchers, shortcuts, and the Windows app-list version on every upgrade; the installed `data` folder is always kept intact, including `papermate.db`, WAL/SHM files, and `papermate-backup.json`.
+- To force a full rebuild, run `powershell -File scripts\install.ps1 -Upgrade -ForceFull`.
 
-Power users can pass `-Upgrade` to `scripts/install.ps1` to upgrade a specific installation.
+The separate `一键安装.bat` also enters this upgrade path automatically when an existing installation is detected. If you want to upgrade a different existing installation, run `scripts/upgrade.ps1` from PowerShell or pass `-Upgrade` to `scripts/install.ps1`.
 
 ## Starting and Stopping
 
@@ -58,7 +63,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, enter your DeepSeek or Zhipu GLM API key in the model settings, and verify the connection.
+Open `http://localhost:3000`, enter your DeepSeek API key in the model settings, and verify the connection.
 
 Production build:
 
@@ -72,7 +77,7 @@ npm start
 - Windows 10 or Windows 11 for the one-click installer.
 - Node.js 22.5 or newer. The installer checks the version and automatically tries to install or upgrade to Node.js LTS with `winget` when it is missing or too old.
 - Internet access on first install to download npm dependencies.
-- A DeepSeek API key or a free Zhipu GLM API key for AI features.
+- A DeepSeek API key for AI features.
 
 ## Notes
 

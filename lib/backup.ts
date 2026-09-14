@@ -57,6 +57,7 @@ export function isBackupPaper(value: unknown): value is BackupPaper {
     typeof candidate.fileName === "string" &&
     typeof candidate.createdAt === "string" &&
     typeof candidate.updatedAt === "string" &&
+    (candidate.lastReadAt === undefined || typeof candidate.lastReadAt === "string") &&
     typeof candidate.pageCount === "number" &&
     Array.isArray(candidate.pages) &&
     !!file &&

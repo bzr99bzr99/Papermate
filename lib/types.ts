@@ -1,3 +1,5 @@
+import type { WebSearchSource } from "./web-search";
+
 export type ModelMode = "fast" | "deep";
 export type ModelProvider = "deepseek" | "glm" | "kimi" | "custom";
 export type PromptKind = "translate" | "context" | "concept" | "free";
@@ -171,6 +173,8 @@ export interface ChatTurn {
   kind?: PromptKind;
   anchor?: TextAnchor;
   selection?: SelectionGroup;
+  /** 本次回答实际使用的联网来源（仅在联网检索成功时写入；老记录没有该字段）。 */
+  sources?: WebSearchSource[];
 }
 
 export interface Conversation {

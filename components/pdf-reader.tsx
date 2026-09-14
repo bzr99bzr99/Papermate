@@ -615,7 +615,13 @@ function chooseSpanAtPoint(
   let best: HTMLElement | undefined;
   let bestScore = Number.POSITIVE_INFINITY;
 
-  for (const span of spanCandidatesAtPoint(stack, clientX, clientY)) {
+  const nearbyCandidates = spanCandidatesAtPoint(stack, clientX, clientY);
+  // 拖动长选区并用滚轮滚动时，指针可能短暂落在页边或文本行间。
+  // 此时仍选取本页离指针最近的文本项，避免当前自绘选区突然消失。
+  const candidates = nearbyCandidates.length || !start
+    ? nearbyCandidates
+    : textLayerSpans(stack);
+  for (const span of candidates) {
     const rect = span.getBoundingClientRect();
     if (rect.width < 0.5 || rect.height < 0.5) continue;
     const horizontalOverlap = startRect
@@ -2152,7 +2158,11 @@ interface PdfReaderProps {
   requestedChapterPage?: ChapterScrollRequest;
   conversationFocusRequest?: ConversationFocusRequest;
   pendingColor?: HighlightColor;
-  onSelectAnchor: (anchor: TextAnchor, additive: boolean) => void;
+  onSelectAnchor: (
+    anchor: TextAnchor,
+    additive: boolean,
+    source?: "selection" | "highlight",
+  ) => void;
   onClearSelection: () => void;
   onActiveChapterChange: (next: { sectionId?: string; page?: number }) => void;
   leftCollapsed?: boolean;
@@ -2190,6 +2200,8 @@ export function PdfReader({
   const zoomFrameRef = useRef(0);
   const wheelDeltaRef = useRef(0);
   const zoomCommitTimerRef = useRef(0);
+  const selectionWheelFrameRef = useRef(0);
+  const selectionPointerRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const zoomValueRef = useRef<HTMLButtonElement>(null);
   const zoomOutButtonRef = useRef<HTMLButtonElement>(null);
   const zoomInButtonRef = useRef<HTMLButtonElement>(null);
@@ -2290,7 +2302,18 @@ export function PdfReader({
     };
 
     const onWheel = (event: WheelEvent) => {
-      if (!event.ctrlKey && !event.metaKey) return;
+      if (!event.ctrlKey && !event.metaKey) {
+        if (selectionRef.current) {
+          selectionPointerRef.current = { x: event.clientX, y: event.clientY };
+          if (!selectionWheelFrameRef.current) {
+            selectionWheelFrameRef.current = window.requestAnimationFrame(() => {
+              selectionWheelFrameRef.current = 0;
+              refreshActiveSelectionFromPointer();
+            });
+          }
+        }
+        return;
+      }
       const deltaPixels = normalizeReaderWheelDelta(
         event.deltaY,
         event.deltaMode,
@@ -2393,6 +2416,10 @@ export function PdfReader({
       if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
       zoomCommitTimerRef.current = 0;
       wheelDeltaRef.current = 0;
+      if (selectionWheelFrameRef.current) {
+        window.cancelAnimationFrame(selectionWheelFrameRef.current);
+        selectionWheelFrameRef.current = 0;
+      }
       host.removeEventListener("wheel", onWheel);
     };
   }, [readerRef, syncZoomUi]);
@@ -2666,11 +2693,32 @@ export function PdfReader({
     }
   }
 
+  function refreshActiveSelectionFromPointer() {
+    const selection = selectionRef.current;
+    const pointer = selectionPointerRef.current;
+    if (!selection || !pointer) return;
+    const end = selectionPointAtPosition(
+      selection.stack,
+      selection.start,
+      pointer.x,
+      pointer.y,
+    );
+    if (!end) return;
+    selection.end = end;
+    renderCurrentSelectionBetweenPoints(
+      readerRef.current,
+      selection.page,
+      selection.start,
+      end,
+    );
+  }
+
   function handleScroll(event?: React.UIEvent<HTMLElement>) {
     if (scalingRef.current) return;
     if (event && event.target !== event.currentTarget) return;
     scrollSuppressUntilRef.current = performance.now() + 180;
     closeHoverHighlightPopover();
+    if (selectionRef.current) refreshActiveSelectionFromPointer();
     if (scrollFrameRef.current) return;
     scrollFrameRef.current = window.requestAnimationFrame(() => {
       scrollFrameRef.current = null;
@@ -2734,7 +2782,7 @@ export function PdfReader({
     // 点击高亮注释 = 划选这段高亮内容，可直接在右侧对话中提问。
     const region = highlightRegions.find((entry) => regionIds.includes(entry.id));
     if (region) {
-      onSelectAnchor(region.anchor, false);
+      onSelectAnchor(region.anchor, false, "highlight");
     }
     return true;
   }
@@ -2824,6 +2872,7 @@ export function PdfReader({
       end: start,
       additive: event.ctrlKey || event.metaKey,
     };
+    selectionPointerRef.current = { x: event.clientX, y: event.clientY };
     readerRef.current.setPointerCapture?.(event.pointerId);
     renderCurrentSelectionBetweenPoints(readerRef.current, page, start, start);
   }
@@ -2877,8 +2926,14 @@ export function PdfReader({
     }
     const selection = selectionRef.current;
     if (!selection || event.pointerId !== selection.pointerId) return;
-    const stack =
-      stackForPoint(event.clientX, event.clientY) ?? selection.stack;
+    selectionPointerRef.current = { x: event.clientX, y: event.clientY };
+    const stackAtPoint = stackForPoint(event.clientX, event.clientY);
+    const stackAtPointPage = Number(
+      stackAtPoint?.parentElement?.getAttribute("data-page"),
+    );
+    const stack = stackAtPointPage === selection.start.page
+      ? stackAtPoint
+      : selection.stack;
     const end = selectionPointAtPosition(
       stack,
       selection.start,
@@ -2923,6 +2978,7 @@ export function PdfReader({
       return;
     }
     selectionRef.current = null;
+    selectionPointerRef.current = undefined;
     readerRef.current?.releasePointerCapture?.(event.pointerId);
     const end =
       selectionPointAtPosition(
@@ -2985,6 +3041,7 @@ export function PdfReader({
     const selection = selectionRef.current;
     if (!selection || event.pointerId !== selection.pointerId) return;
     selectionRef.current = null;
+    selectionPointerRef.current = undefined;
     readerRef.current?.releasePointerCapture?.(event.pointerId);
     window.getSelection()?.removeAllRanges();
     clearCurrentSelectionHighlights(readerRef.current);
@@ -3210,6 +3267,19 @@ function readableTime(value: string) {
   }).format(new Date(value));
 }
 
+function translationSourceText(turn: ChatTurn, conversation: Conversation): string {
+  const anchors = turn.selection?.anchors.length
+    ? turn.selection.anchors
+    : turn.anchor
+      ? [turn.anchor]
+      : conversation.selection?.anchors.length
+        ? conversation.selection.anchors
+        : conversation.anchor
+          ? [conversation.anchor]
+          : [];
+  return anchors.map((anchor) => anchor.quote.replace(/\s+/g, " ").trim()).filter(Boolean).join(" / ");
+}
+
 interface HighlightPopoverProps {
   regionIds: string[];
   regions: HighlightRegion[];
@@ -3248,7 +3318,7 @@ function HighlightPopover({
     const items: Array<{ conversation: Conversation; turn: ChatTurn }> = [];
     for (const conversation of relatedConversations) {
       for (const turn of [...conversation.turns].reverse()) {
-        const dedupeKey = `${turn.kind ?? "normal"}:${conversation.scope ?? "normal"}:${turn.content}`;
+        const dedupeKey = turn.id;
         if (turn.role !== "user" || seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
         items.push({ conversation, turn });
@@ -3260,7 +3330,7 @@ function HighlightPopover({
   useEffect(() => {
     setRecordsConversation((current) => {
       if (current && relatedConversations.some((item) => item.id === current.id)) {
-        return current;
+        return relatedConversations.find((item) => item.id === current.id);
       }
       return relatedConversations[0];
     });
@@ -3287,9 +3357,7 @@ function HighlightPopover({
 
   function selectIndexTurn(conversation: Conversation, turnId: string) {
     setSelectedTurnId(turnId);
-    if (recordsConversation?.id !== conversation.id) {
-      setRecordsConversation(conversation);
-    }
+    setRecordsConversation(conversation);
     // 滚动浮窗下方的对话记录到对应记录（不滚动阅读窗口）。
     requestAnimationFrame(() => {
       const target = recordsListRef.current?.querySelector(
@@ -3423,12 +3491,21 @@ function HighlightPopover({
                     <span className={`highlight-color-dot highlight-color-dot-${color}`} aria-hidden="true" />
                     <span className="highlight-popover-page">
                       p.{page}
-                      {conversation.scope === "context" || item.turn.kind === "context" ? (
+                      {item.turn.kind === "context" ? (
                         <span className="index-badge">全文</span>
+                      ) : null}
+                      {item.turn.kind === "translate" ? (
+                        <span className="index-badge">翻译</span>
                       ) : null}
                     </span>
                     <span className="highlight-popover-question">
-                      {formatAnchorExcerpt(item.turn.content, 36, 18)}
+                      {item.turn.kind === "translate"
+                        ? formatAnchorExcerpt(
+                            translationSourceText(item.turn, item.conversation) || item.turn.content,
+                            36,
+                            18,
+                          )
+                        : formatAnchorExcerpt(item.turn.content, 36, 18)}
                     </span>
                     <time>{readableTime(item.turn.createdAt)}</time>
                   </button>

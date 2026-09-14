@@ -6,18 +6,6 @@ coverage/
 *.lnk
 .env*
 
-# 本地 npm 运行残留
-.npm-cache/
-.npm-ci.log
-.npm-cache.log
-
-# 开发服务器临时日志与导出的用户数据备份（任何目录下都不跟踪）
-.dev-server.*.log
-papermate-backup-*.json
-
-# 代理运行时记忆（本机私有，不提交）
-.mnemon/
-
 !.env.example
 npm-debug.log*
 yarn-debug.log*
@@ -30,3 +18,14 @@ logs/
 Thumbs.db
 .idea/
 .vscode/
+
+artifacts/
+# 部署脚本（scripts/update-installed-*.ps1）会在项目内留整份备份；它不属于源码，
+# 也不能参与类型检查（tsconfig 同时排除了它，否则备份里的旧代码会把构建搞挂）。
+asset-backups/
+
+# 本机数据与备份：完整 JSON 备份体积大且含个人论文内容，绝不入库。
+papermate-backup-*.json
+# 编辑器/工具（DSH 记忆库等）的本地状态目录
+.mnemon/
+.npm-cache/

@@ -138,13 +138,15 @@ if ($listener) {
 }
 
 if (-not $alreadyRunning) {
-    $node = Get-NodePath
+    $node = Join-Path $projectDir "node.exe"
+    if (-not (Test-Path -LiteralPath $node)) { $node = Get-NodePath }
     if (-not $node) {
         throw "找不到 Node.js，请重新运行一键安装。"
     }
 
     $nextCli = Join-Path $projectDir "node_modules\next\dist\bin\next"
-    if (-not (Test-Path -LiteralPath $nextCli)) {
+    $standalone = Join-Path $projectDir "server.js"
+    if (-not (Test-Path -LiteralPath $standalone) -and -not (Test-Path -LiteralPath $nextCli)) {
         throw "项目依赖不完整，请重新运行一键安装。"
     }
     if (-not (Test-Path -LiteralPath (Join-Path $projectDir ".next\BUILD_ID"))) {
@@ -152,7 +154,14 @@ if (-not $alreadyRunning) {
     }
 
     Write-Host "正在启动 PaperMate 服务（端口 $port）..."
-    $arguments = @($nextCli, "start", "-H", "127.0.0.1", "-p", "$port")
+    $env:PAPERMATE_APP_DATA = $AppDataDir
+    if (Test-Path -LiteralPath $standalone) {
+        $env:PORT = "$port"
+        $env:HOSTNAME = '127.0.0.1'
+        $arguments = @(('"' + $standalone + '"'))
+    } else {
+        $arguments = @(('"' + $nextCli + '"'), "start", "-H", "127.0.0.1", "-p", "$port")
+    }
     $process = Start-Process `
         -FilePath $node `
         -ArgumentList $arguments `

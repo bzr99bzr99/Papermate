@@ -32,7 +32,7 @@ if (Test-Path -LiteralPath $pidFile) {
         catch {
             $owner = $null
         }
-        $isPaperMate = $owner -and $owner.CommandLine -like "*$projectDir*" -and $owner.CommandLine -like "*next*start*"
+        $isPaperMate = $owner -and $owner.CommandLine -like "*$projectDir*" -and ($owner.CommandLine -like "*next*start*" -or $owner.CommandLine -like "*server.js*")
         if (-not $isPaperMate -and -not $owner -and $process.ProcessName -eq "node") {
             $isPaperMate = $true
         }
@@ -56,7 +56,7 @@ if (-not $stopped -and $projectDir) {
         catch {
             $owner = $null
         }
-        $isPaperMate = $owner -and $owner.CommandLine -like "*next*start*" -and $owner.CommandLine -like "*$projectDir*"
+        $isPaperMate = $owner -and ($owner.CommandLine -like "*next*start*" -or $owner.CommandLine -like "*server.js*") -and $owner.CommandLine -like "*$projectDir*"
         if (-not $isPaperMate -and -not $owner) {
             $ownerProcess = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
             if ($ownerProcess -and $ownerProcess.ProcessName -eq "node") {

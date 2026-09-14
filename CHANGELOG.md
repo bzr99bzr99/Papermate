@@ -2,6 +2,41 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [4.0.0] - 2026-08-16
+
+### Added
+
+- **Web search (联网搜索)**: a three-state switch (off / auto / force) that lets any chat model answer with up-to-date external information. Auto mode only searches when the question concerns external facts, recency, tools, products, prices, or versions; force mode searches on every question. Results are returned as numbered, clickable citation badges, and the paper body is never sent — only the question text reaches the search provider. Failures degrade to an offline answer instead of blocking the question. Providers: Zhipu (`search_std`, `search_pro`, `search_pro_sogou`, `search_pro_quark`), Bocha, Tavily, or a custom endpoint (`lib/web-search.ts`, `lib/web-search-store.ts`, `app/api/web-search/route.ts`, `data/search.json`).
+- **Smart translation and auto-translate**: `Alt`+`T` translates the selection; `Alt`+`Shift`+`T` toggles auto-translate, which translates each newly selected passage automatically as a fresh single-fragment session. Single sentences and paragraphs get a short grammar explanation after the translation, while multi-fragment selections are labelled `# 1`/`# 2`.
+- **In-app auto update**: checks GitHub formal releases in the background and only prompts when a newer version exists, with release notes, a progress bar, SHA-256 verification, and a standalone helper that stops the service, backs up the previous installation, swaps program files, health-checks the new build and rolls back automatically on failure. Detection deliberately avoids `api.github.com` and uses the `github.com/releases/latest` redirect plus the Atom feed, so the unauthenticated 60-requests-per-hour limit cannot lock users out of updating (`lib/updater.ts`, `lib/update-version.ts`, `lib/update-guard.ts`, `lib/update-activity.ts`, `components/update-manager.tsx`, `app/api/updates/route.ts`, `scripts/apply-update.ps1`, `scripts/package-update.mjs`).
+- Custom web-search prompt rules can be edited in the `[websearch]` block of `public/prompts.txt`.
+
+### Changed
+
+- **Interface refresh**: unified theme accents and companion styling, refined layout, and themed in-app confirmation dialogs replacing the browser's native `confirm` for deleting artifacts and their version history.
+- **Operation logic optimised**: requests from cross-site pages are rejected on the update endpoint while the app's own requests pass (same-origin checks based on the raw `Host` header, since browsers do not always send `Origin` on same-origin `POST`); model requests are paused while an update installs, and in-flight translations, questions and saves are awaited before installing.
+- `Enter` sends a chat message and `Shift`+`Enter` inserts a newline, without swallowing IME composition.
+- The reading companion now receives the actual conversation content (original passage, question, and answer) or the paper abstract, and its personas are freer: it may ask questions and raise topics, with a new mentor persona.
+
+### Fixed
+
+- Failed generation no longer overwrites existing reading notes, mind maps or writing analysis; a failure now shows a dismissible warning overlay with the reason and a copy button, and the previous content is restored.
+- Failed chat sends no longer write to the conversation history — the reused conversation is restored, an empty new conversation is removed, and the unsent text goes back into the input box.
+- Removed the non-existent "DeepSeek Max" tier and aligned every model label with its real model id (`glm-4-flash`, `glm-4.7-flash`, `deepseek-v4-flash`, `kimi-k2.6`); the quick/deep buttons now toggle the thinking switch rather than switching models.
+- The quick/deep buttons no longer switch model tiers; the backend sends a uniform `thinking` parameter for all four models.
+- Companion appearance fixed per level (laptop only at L5, manuscripts, magnifier, coffee cup, staff, and literature pile all grounded rather than floating); the speech bubble widened to 360px, flips direction near viewport edges, and idle chatter frequency now follows the talkativeness slider.
+- `Ctrl`/`Cmd` + wheel zoom only scales the page content, keeps page labels at a constant size, compensates grid slots precisely, resolves the zoom anchor over the toolbar, labels, gaps and margins, and bounds canvas bitmap memory at high zoom.
+- `kimi-k2.5` corrected to the actually available `kimi-k2.6`, with `kimi-k3` → `kimi-k2.5` fallback, fixing "connection test passes but generation returns 404".
+- Paper title, keyword and journal parsing now combines first-page layout blocks, Crossref and OpenAlex lookups, and local extraction; wrapped titles are merged and journal headers excluded.
+- Application icons regenerated from `papermate.png`, and shortcuts created by the installer use the new icon.
+- Removed the obsolete `scripts/upgrade.ps1` and `一键升级.bat`; `一键安装.bat` alone handles both fresh and upgrade installs.
+- Removed the dead `/api/deepseek/*` routes left over from the retired provider layout.
+
+### Engineering & Quality
+
+- Test suite expanded to 215 tests across 16 files covering conversations, library ordering, web search, prompt loading, the updater, update guards, update version comparison, model configuration, storage and PDF handling.
+- Release workflow `.github/workflows/release.yml` builds, verifies (secret-leak assertions plus a real boot smoke test) and uploads a draft release for a matching `vX.Y.Z` tag.
+
 ## [3.6.0] - 2026-08-16
 
 ### Added

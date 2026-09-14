@@ -1,0 +1,94 @@
+name: Windows release package
+
+# 打 tag 时自动产出可直接安装的更新包：
+#   papermate-windows-x64.zip          预构建包（含便携 node.exe，用户更新不需要装依赖或编译）
+#   papermate-windows-x64.zip.sha256   校验文件，客户端下载后逐字节校验
+#   papermate-version.json             版本信息（版本、tag、buildId、体积、文件数）
+#
+# 发布的是 draft（草稿）：GitHub 的 /releases/latest 不会返回草稿，
+# 所以客户端在人工点“Publish”之前不会看到这个版本——这是故意的发布闸门。
+#
+# 版本号规则：tag 必须与 package.json 的 version 完全一致（例如都改成 4.0.0 后打 v4.0.0）。
+# 安装器会用字符串严格比对包内 package.json 的版本，不一致会拒绝安装。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "仅手动验证打包流程（不会创建 Release）"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      # 组装 + 硬断言（不得含 data/ .git/ .env* 等）+ 用包内 node.exe 真正启动一次自检
+      - name: Package update
+        run: node scripts/package-update.mjs
+
+      - name: Archive and checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $PWD 'artifacts/windows'
+          $archive = Join-Path $PWD 'artifacts/papermate-windows-x64.zip'
+          if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+          [IO.Compression.ZipFile]::CreateFromDirectory($source, $archive, [IO.Compression.CompressionLevel]::Optimal, $false)
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath ($archive + '.sha256') -Value ($hash + '  papermate-windows-x64.zip') -Encoding ascii
+          Write-Host "SHA256: $hash"
+
+      # 压缩包往返校验：解压后结构必须完整，且绝不能出现用户数据或密钥。
+      - name: Verify archive contents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $PWD 'artifacts/papermate-windows-x64.zip'
+          $out = Join-Path $PWD 'artifacts/unpack-check'
+          if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
+          Expand-Archive -LiteralPath $archive -DestinationPath $out
+          $required = @('server.js', 'node.exe', 'package.json', 'papermate-version.json', '.next\BUILD_ID', 'public\prompts.txt', 'scripts\apply-update.ps1')
+          foreach ($item in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $out $item))) { throw "压缩包缺少：$item" }
+          }
+          foreach ($item in @('data', '.git', 'apikey.txt', 'papermate.db')) {
+            if (Test-Path -LiteralPath (Join-Path $out $item)) { throw "压缩包混入了禁止内容：$item" }
+          }
+          $files = Get-ChildItem -LiteralPath $out -Recurse -File -Force
+          $sizeMb = [math]::Round(($files | Measure-Object Length -Sum).Sum / 1MB, 1)
+          Write-Host "解压校验通过：$($files.Count) 个文件，$sizeMb MB"
+          Remove-Item -LiteralPath $out -Recurse -Force
+
+      # 只有打 tag 才创建 Release；手动触发只验证打包流程。
+      - name: Create draft release with verified assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          if ($tag -ne "v$version") { throw "tag（$tag）与 package.json 版本（$version）不一致" }
+          gh release create $tag `
+            artifacts/papermate-windows-x64.zip `
+            artifacts/papermate-windows-x64.zip.sha256 `
+            artifacts/windows/papermate-version.json `
+            --draft --verify-tag --title "PaperMate $tag" --generate-notes
+          Write-Host "已创建草稿 Release $tag：确认无误后在 GitHub 上点 Publish，客户端才会检测到。"

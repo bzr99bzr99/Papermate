@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   anchorExcerptParts,
   buildContext,
+  buildTranslationContext,
   buildFullPaperContext,
   buildPaperDigest,
   clampReaderZoom,
@@ -39,6 +40,25 @@ import type {
   SelectionGroup,
   TextAnchor,
 } from "./types";
+
+describe("translation selection context", () => {
+  it("sends only the exact selected text without surrounding blocks or location metadata", () => {
+    const page: ParsedPage = { page: 7, text: "Unselected prefix. Selected text [3]. Unselected suffix.", blocks: [], figures: [] };
+    const anchor = makeAnchor("paper", page, "Selected text [3].", 19, "2 Methods");
+    expect(buildTranslationContext([anchor])).toBe("Selected text [3].");
+  });
+
+  it("orders multiple fragments by their original position without adding labels", () => {
+    const page: ParsedPage = { page: 2, text: "", blocks: [], figures: [] };
+    const first = makeAnchor("paper", page, "3. Results", 10, "Results");
+    const second = makeAnchor("paper", page, "Accuracy is 95%.", 40, "Results");
+    const third = makeAnchor("paper", { ...page, page: 3 }, "See Eq. (4).", 0);
+    const anchors = [third, second, first];
+    expect(buildTranslationContext(anchors)).toBe("3. Results\n\nAccuracy is 95%.\n\nSee Eq. (4).");
+    expect(anchors).toEqual([third, second, first]);
+    expect(buildTranslationContext([])).toBe("");
+  });
+});
 
 function textItem(
   str: string,

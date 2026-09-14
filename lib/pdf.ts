@@ -951,6 +951,14 @@ export function paragraphBlocksFromLines(
   return blocks;
 }
 
+/** 翻译只发送实际划选文字，定位信息和相邻段落不属于待译内容。 */
+export function buildTranslationContext(anchors: TextAnchor[]): string {
+  return [...anchors]
+    .sort((a, b) => a.page - b.page || a.start - b.start)
+    .map((anchor) => anchor.quote)
+    .join("\n\n");
+}
+
 export function buildContext(
   pages: ParsedPage[],
   anchor?: TextAnchor | TextAnchor[],

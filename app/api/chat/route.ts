@@ -1,8 +1,10 @@
+import { beginModelRequest } from "@/lib/update-activity";
 import { NextResponse } from "next/server";
-import { loadSystemPrompt, loadTaskInstructions, type Task } from "@/lib/prompts";
+import { loadSystemPrompt, loadTaskInstructions, loadWebSearchPrompt, type Task } from "@/lib/prompts";
 import { readApiKeyFile } from "@/lib/api-keys";
 import { resolveModel, type ResolvedModel } from "@/lib/models-store";
 import type { CustomModelConfig } from "@/lib/models";
+import { formatWebSearchBlock, normalizeSources, type RawWebSearchSource } from "@/lib/web-search";
 
 export const runtime = "nodejs";
 
@@ -90,14 +92,31 @@ interface ChatRequestBody {
   context?: string;
   question?: string;
   messages?: IncomingMessage[];
+  /** 客户端先调 /api/web-search 拿到的来源；缺省或为空时，请求体与未接联网前完全一致。 */
+  webSources?: RawWebSearchSource[];
 }
 
-function buildUserContent(context: string, question: string): string {
+function buildUserContent(context: string, question: string, webBlock = ""): string {
   return [
     "以下是来自用户本地论文的必要文本。",
     context,
+    ...(webBlock ? ["", webBlock] : []),
     question ? `\n用户请求：${question}` : "\n请按任务要求完成。",
   ].join("\n");
+}
+
+/** 归一化客户端回传的来源（重新编号+截断），拼成注入块；无来源时返回空串。 */
+function buildWebBlock(sources: RawWebSearchSource[] | undefined): string {
+  const normalized = normalizeSources(Array.isArray(sources) ? sources : []);
+  return normalized.length ? formatWebSearchBlock(normalized) : "";
+}
+
+/** 系统提示词：联网时追加检索规则块。 */
+function buildSystemPrompt(task: Task, webBlock: string): string {
+  const instructions = loadTaskInstructions();
+  const systemPrompt = loadSystemPrompt();
+  const webRule = webBlock ? `\n\n联网检索规则：\n${loadWebSearchPrompt()}` : "";
+  return `${systemPrompt}${webRule}\n\n任务要求：\n${instructions[task]}`;
 }
 
 async function requestWithRetry(
@@ -160,8 +179,7 @@ async function handleCustomRequest(
     return NextResponse.json({ error: "没有可供分析的论文内容。" }, { status: 400, headers: { "Cache-Control": "no-store" } });
   }
 
-  const instructions = loadTaskInstructions();
-  const systemPrompt = loadSystemPrompt();
+  const webBlock = buildWebBlock(body.webSources);
   // stream 与 messages 由服务端强制，用户配置的 params 无法覆盖。
   const upstreamBody = {
     model: config.model,
@@ -169,9 +187,9 @@ async function handleCustomRequest(
     ...(config.params ?? {}),
     ...(mode === "deep" ? config.deepParams ?? {} : {}),
     messages: [
-      { role: "system", content: `${systemPrompt}\n\n任务要求：\n${instructions[task]}` },
+      { role: "system", content: buildSystemPrompt(task, webBlock) },
       ...messages,
-      { role: "user", content: buildUserContent(context, question) },
+      { role: "user", content: buildUserContent(context, question, webBlock) },
     ],
   };
   let upstreamStatus = 0;
@@ -194,7 +212,7 @@ async function handleCustomRequest(
   }
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const body = (await request.json()) as ChatRequestBody;
 
   // 自定义模型：modelId 命中自定义配置时按模型配置请求（内置模型路径不受影响）。
@@ -224,9 +242,10 @@ export async function POST(request: Request) {
   if (!question && !context) return NextResponse.json({ error: "没有可供分析的论文内容。" }, { status: 400, headers: { "Cache-Control": "no-store" } });
 
   // 提示词来自项目 public/prompts.txt（可随时编辑，缺失任务回退内置默认）；
-  // [system] 为基础系统提示词（"你是一个论文阅读助手"人设）。
-  const instructions = loadTaskInstructions();
-  const systemPrompt = loadSystemPrompt();
+  // [system] 为基础系统提示词（"你是一个论文阅读助手"人设），
+  // [websearch] 仅在本次带联网来源时追加。
+  const webBlock = buildWebBlock(body.webSources);
+  const systemContent = buildSystemPrompt(task, webBlock);
 
   let upstreamStatus = 0;
   try {
@@ -254,10 +273,10 @@ export async function POST(request: Request) {
             messages: [
               {
                 role: "system",
-                content: `${systemPrompt}\n\n任务要求：\n${instructions[task]}`,
+                content: systemContent,
               },
               ...messages,
-              { role: "user", content: buildUserContent(context, question) },
+              { role: "user", content: buildUserContent(context, question, webBlock) },
             ],
           }),
         },
@@ -274,4 +293,23 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: `无法连接 ${target.label}，请稍后重试。` }, { status: 502, headers: { "Cache-Control": "no-store" } });
   }
+}
+
+export async function POST(request: Request) {
+  let finish: () => void;
+  try { finish = beginModelRequest(); } catch { return Response.json({ error: "正在更新，请稍后重试" }, { status: 503 }); }
+  try {
+    const response = await handlePost(request);
+    if (!response.body) { finish(); return response; }
+    const reader = response.body.getReader();
+    return new Response(new ReadableStream({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) { finish(); controller.close(); } else controller.enqueue(value);
+        } catch (error) { finish(); controller.error(error); }
+      },
+      async cancel(reason) { try { await reader.cancel(reason); } finally { finish(); } },
+    }), { status: response.status, headers: response.headers });
+  } catch (error) { finish(); throw error; }
 }

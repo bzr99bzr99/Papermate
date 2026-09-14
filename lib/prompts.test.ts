@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   loadSystemPrompt,
   loadTaskInstructions,
+  loadWebSearchPrompt,
   parsePromptsFile,
   SYSTEM_PROMPT_DEFAULT,
   taskInstructions,
+  WEB_SEARCH_PROMPT_DEFAULT,
 } from "./prompts";
 
 const tempDirs: string[] = [];
@@ -29,7 +31,12 @@ function tempPromptsFile(content: string): string {
 describe("task prompts", () => {
   it("keeps shipped overrides identical to all bundled fallback prompts", () => {
     const shipped = parsePromptsFile(readFileSync(path.join(process.cwd(), "public/prompts.txt"), "utf8"));
-    expect(shipped).toEqual({ system: SYSTEM_PROMPT_DEFAULT, ...taskInstructions });
+    const normalizeLines = (value: string | undefined) => value?.replace(/\r\n/g, "\n");
+    expect(normalizeLines(shipped.system)).toBe(normalizeLines(SYSTEM_PROMPT_DEFAULT));
+    expect(normalizeLines(shipped.websearch)).toBe(normalizeLines(WEB_SEARCH_PROMPT_DEFAULT));
+    for (const task of Object.keys(taskInstructions) as Array<keyof typeof taskInstructions>) {
+      expect(normalizeLines(shipped[task])).toBe(normalizeLines(taskInstructions[task]));
+    }
   });
   it("keeps a dedicated instruction for every chat task", () => {
     expect(Object.keys(taskInstructions).sort()).toEqual([
@@ -116,6 +123,22 @@ describe("task prompts", () => {
     const file = tempPromptsFile("[system]\n你是我的论文翻译助手。\n\n[translate]\n自定义翻译指令。\n");
     expect(loadSystemPrompt(file)).toBe("你是我的论文翻译助手。");
     expect(loadTaskInstructions(file).translate).toBe("自定义翻译指令。");
+  });
+
+  it("parses the [websearch] block and falls back to the bundled default", () => {
+    const parsed = parsePromptsFile("[websearch]\n只允许引用给定编号 [1]。\n");
+    expect(parsed.websearch).toBe("只允许引用给定编号 [1]。");
+    expect(loadWebSearchPrompt(tempPromptsFile("[websearch]\n自定义联网规则。\n"))).toBe("自定义联网规则。");
+    // 文件缺失或没有该块时回退内置默认，且不影响任务提示词
+    const file = tempPromptsFile("[translate]\n翻译。\n");
+    expect(loadWebSearchPrompt(file)).toBe(WEB_SEARCH_PROMPT_DEFAULT);
+    expect(loadTaskInstructions(file).translate).toBe("翻译。");
+  });
+
+  it("keeps the web search rules grounded in the numbered sources", () => {
+    expect(WEB_SEARCH_PROMPT_DEFAULT).toContain("不是论文原文");
+    expect(WEB_SEARCH_PROMPT_DEFAULT).toContain("编号必须来自检索结果里实际存在的条目");
+    expect(WEB_SEARCH_PROMPT_DEFAULT).toContain("公开资料中未见相关说明");
   });
 });
 
