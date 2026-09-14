@@ -175,6 +175,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // 注意：本文件每个真正发起下载的用例都会 await 到终态（ready/error）才结束。
+  // 这很重要：download() 是后台任务，若跨过测试边界继续运行，它会读到下一个测试的
+  // fetch 桩，并把状态写进下一个测试的 status.json（路径按当前 PAPERMATE_APP_DATA
+  // 解析），让断言看到别人的消息——曾经导致「声明体积不符」用例偶发失败。
+  // 这里不要写「等 phase 离开 downloading」的兜底轮询：有用例（本次进程自己发起的
+  // downloading 不会被误判为中断）就是故意停在 downloading 的，会被白等超时。
   vi.unstubAllGlobals();
   unlockUpdate();
   if (previousEnv === undefined) delete process.env.PAPERMATE_APP_DATA;
@@ -308,6 +314,10 @@ describe.skipIf(!WINDOWS_X64)("下载更新包", () => {
     expect(["downloading", "ready"]).toContain(first.phase);
     expect(second.phase).toBe(first.phase);
     expect(existsSync(lockFile())).toBe(true);
+    // 必须等这次下载落地：download() 是后台任务，若跨到下一个测试才结束，
+    // 它会用下一个测试的 fetch 桩继续跑，并把 setState 写进下一个测试的 status 文件
+    //（状态路径按当时的 PAPERMATE_APP_DATA 解析），造成跨测试串扰。
+    expect((await waitForPhase("ready")).phase).toBe("ready");
   });
 
   it("校验失败：报错并释放锁，旧版本不受影响", async () => {

@@ -8,6 +8,7 @@ All notable changes to PaperMate are documented in this file.
 
 - Prompt caching could return the wrong file's contents. The caches behind `public/prompts.txt` (task, system and web-search prompts) and `public/buddy-personas.txt` were keyed only on the file modification time, so two different files written within the same millisecond collided and the second read returned the first file's parsed prompts. The cache key now includes the resolved file path (`lib/prompts.ts`). This reproduced reliably on Linux, where consecutive file writes share a millisecond, and intermittently on Windows; the regression test now pins both files to an identical timestamp so it fails on every platform without the fix.
 - CI failed on Linux: the in-app auto update is a Windows x64 feature, but its suite ran on `ubuntu-latest` and asserted Windows-only behaviour. Those tests are now skipped on other platforms instead of failing, and CI runs on both `ubuntu-latest` and `windows-latest` so the updater keeps full coverage.
+- Flaky updater test: the "double-click does not download twice" case started a background download and never waited for it. Because the status file path is resolved from `PAPERMATE_APP_DATA` at write time, that stale download kept running into the following tests, picked up their `fetch` stub, and wrote its own message into their `status.json` — so the declared-size test intermittently reported the checksum-failure message instead. Every test that starts a download now waits for a terminal phase before finishing.
 
 ## [4.0.0] - 2026-08-16
 
