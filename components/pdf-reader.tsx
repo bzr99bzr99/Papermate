@@ -1383,9 +1383,10 @@ function useReaderWidth(
     const element = readerRef.current;
     if (!element) return;
     let frame = 0;
+    let settleTimer = 0;
     const measure = () => {
       frame = 0;
-      if (scalingRef?.current) return;
+      if (scalingRef?.current || document.body.classList.contains("papermate-resizing")) return;
       const style = window.getComputedStyle(element);
       const horizontalPadding =
         (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
@@ -1395,12 +1396,17 @@ function useReaderWidth(
       // 拖动侧边栏期间冻结阅读器宽度：页面保持原尺寸与位置，避免内容随拖拽
       // 逐帧重排造成滚动跳动；拖动结束（papermate-resize-settled）后立即重测。
       if (document.body.classList.contains("papermate-resizing")) return;
-      // rAF 合并：一帧内多次尺寸变化只提交一次，避免逐帧触发 React 渲染。
+      // 等布局稳定再提交宽度，避免侧栏开关/连续缩放窗口反复取消并重绘 PDF。
       if (scalingRef?.current) return;
-      if (frame) return;
-      frame = window.requestAnimationFrame(measure);
+      window.clearTimeout(settleTimer);
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = 0;
+      settleTimer = window.setTimeout(() => {
+        frame = window.requestAnimationFrame(measure);
+      }, 120);
     };
     const onSettled = () => {
+      window.clearTimeout(settleTimer);
       if (frame) window.cancelAnimationFrame(frame);
       frame = 0;
       if (!document.body.classList.contains("papermate-resizing")) measure();
@@ -1410,6 +1416,7 @@ function useReaderWidth(
     observer.observe(element);
     window.addEventListener("papermate-resize-settled", onSettled);
     return () => {
+      window.clearTimeout(settleTimer);
       if (frame) window.cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("papermate-resize-settled", onSettled);

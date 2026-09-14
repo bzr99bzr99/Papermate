@@ -18,6 +18,11 @@ export interface UpdateStatus {
   notes?: string;
   releaseUrl?: string;
   progress?: number;
+  /** 安装阶段的里程碑进度，独立于下载百分比。 */
+  installProgress?: number;
+  installStage?: string;
+  helperPid?: number;
+  helperStartedAt?: number;
   message?: string;
   /** 状态最后写入时间（毫秒时间戳），用于识别被中断的下载/安装。 */
   updatedAt?: number;

@@ -15,10 +15,15 @@ $failed = Join-Path $parent ('.papermate-failed-' + $stamp)
 $swapped = $false
 $stopped = $false
 $newProcess = $null
-function Status([string]$phase, [string]$message) {
+function Status([string]$phase, [string]$message, [int]$progress = -1) {
     $state = Get-Content -LiteralPath $job.statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $state.phase = $phase
     $state.message = $message
+    $state | Add-Member -NotePropertyName updatedAt -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Force
+    $state | Add-Member -NotePropertyName installStage -NotePropertyValue $message -Force
+    $state | Add-Member -NotePropertyName helperPid -NotePropertyValue $PID -Force
+    if ($progress -ge 0) { $state | Add-Member -NotePropertyName installProgress -NotePropertyValue $progress -Force }
+    Write-Output ((Get-Date -Format o) + ' ' + $phase + ' ' + $message)
     $temp = $job.statusPath + '.helper.tmp'
     [IO.File]::WriteAllText($temp, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $temp -Destination $job.statusPath -Force
@@ -29,7 +34,7 @@ function Remove-StaleSiblings {
         foreach ($pattern in @('.papermate-backup-*', '.papermate-failed-*')) {
             Get-ChildItem -LiteralPath $parent -Directory -Filter $pattern -ErrorAction SilentlyContinue |
                 Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) -and $_.FullName -ne $backup -and $_.FullName -ne $failed } |
-                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+                ForEach-Object { Assert-Sibling $_.FullName; Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
     catch { }
@@ -55,6 +60,7 @@ function Start-Version {
     return $process
 }
 try {
+    Status 'installing' '正在校验安装包' 5
     Assert-Sibling $project
     Assert-Sibling $stage
     Assert-Sibling $backup
@@ -65,10 +71,18 @@ try {
     if ((Get-FileHash -LiteralPath $job.archive -Algorithm SHA256).Hash -ne $job.sha256) { throw 'Archive checksum mismatch' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     New-Item -ItemType Directory -Path $stage | Out-Null
+    Status 'installing' '正在解压程序文件' 10
     $zip = [IO.Compression.ZipFile]::OpenRead($job.archive)
     try {
         [long]$total = 0
+        $entryIndex = 0
+        $lastProgressWrite = [DateTime]::MinValue
         foreach ($entry in $zip.Entries) {
+            $entryIndex++
+            if (([DateTime]::UtcNow - $lastProgressWrite).TotalSeconds -ge 1) {
+                Status 'installing' '正在解压程序文件' (10 + [int](25 * $entryIndex / [Math]::Max(1, $zip.Entries.Count)))
+                $lastProgressWrite = [DateTime]::UtcNow
+            }
             $total += $entry.Length
             if ($total -gt 4GB) { throw 'Archive exceeds extraction limit' }
             $name = $entry.FullName.Replace('/', '\')
@@ -85,10 +99,12 @@ try {
     if (!$owner -or $owner.Name -ne 'node.exe' -or $owner.CommandLine.IndexOf($project, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw 'Cannot verify running PaperMate process' }
     # Give the installation HTTP response time to reach the browser.
     Start-Sleep -Seconds 2
+    Status 'installing' '正在停止旧服务' 40
     Stop-Process -Id ([int]$job.serverPid) -Force
     Wait-Process -Id ([int]$job.serverPid) -Timeout 20 -ErrorAction SilentlyContinue
     $stopped = $true
     # Keep the complete old installation as the rollback copy, including SQLite WAL files.
+    Status 'installing' '正在备份旧版本' 50
     $moved = $false
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
         try { Move-Item -LiteralPath $project -Destination $backup; $moved = $true; break }
@@ -96,16 +112,20 @@ try {
     }
     if (!$moved) { throw 'Installation files are still in use' }
     $swapped = $true
+    Status 'installing' '正在保留论文、笔记与设置' 60
     if (Test-Path -LiteralPath (Join-Path $backup 'data')) { Copy-Item -LiteralPath (Join-Path $backup 'data') -Destination (Join-Path $stage 'data') -Recurse }
     foreach ($name in @('public\prompts.txt', 'public\quotes.txt')) {
         $source = Join-Path $backup $name
         if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name) -Force }
     }
+    Status 'installing' '正在替换程序文件' 75
     Move-Item -LiteralPath $stage -Destination $project
+    Status 'installing' '正在启动新版本，页面将暂时断开连接' 85
     $newProcess = Start-Version
     $healthy = $false
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Seconds 1
+        Status 'installing' '正在验证新版本启动状态' 90
         try {
             $health = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $job.port + '/api/updates') -TimeoutSec 2
             if ($health.currentVersion -eq $job.version) { $healthy = $true; break }
@@ -120,11 +140,13 @@ try {
     foreach ($script in @('start-papermate.ps1', 'stop-papermate.ps1', 'uninstall.ps1')) {
         Copy-Item -LiteralPath (Join-Path $project ('scripts\' + $script)) -Destination (Join-Path $appData $script) -Force
     }
-    Status 'complete' '更新完成，即将刷新页面'
+    Status 'complete' '更新完成，即将刷新页面' 100
     Remove-StaleSiblings
 } catch {
     $reason = $_.Exception.Message
+    Write-Output ($_ | Out-String)
     try {
+        Status 'installing' '安装遇到问题，正在恢复旧版本'
         if ($newProcess -and !$newProcess.HasExited) { Stop-Process -Id $newProcess.Id -Force; Start-Sleep -Seconds 2 }
         if ($swapped) {
             if (Test-Path -LiteralPath $project) { Assert-Sibling $project; Assert-Sibling $failed; Move-Item -LiteralPath $project -Destination $failed }
@@ -138,5 +160,11 @@ try {
     $lock = Join-Path (Split-Path -Parent $JobFile) 'lock'
     if (Test-Path -LiteralPath $lock) { Remove-Item -LiteralPath $lock }
     # 下载的更新包（含压缩包，约 100-200MB）已经用完，清掉以免反复更新撑爆磁盘。
-    if ($job.job -and (Test-Path -LiteralPath $job.job)) { Remove-Item -LiteralPath $job.job -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($job.job -and (Test-Path -LiteralPath $job.job)) {
+        $cleanupPath = [IO.Path]::GetFullPath($job.job).TrimEnd('\')
+        $updatesPath = [IO.Path]::GetFullPath((Split-Path -Parent $JobFile)).TrimEnd('\')
+        if ((Split-Path -Parent $cleanupPath) -eq $updatesPath -and (Split-Path -Leaf $cleanupPath) -match '^[0-9a-f-]{36}$') {
+            Remove-Item -LiteralPath $cleanupPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }

@@ -1,3 +1,5 @@
+import * as childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -8,6 +10,11 @@ import { version } from "../package.json";
 import { beginDownload, checkUpdate, installUpdate, updateStatus } from "./updater";
 import { UPDATE_ASSET, UPDATE_CHECKSUM_ASSET, releasesAtomUrl } from "./update-version";
 import { lockForUpdate, unlockUpdate, beginModelRequest } from "./update-activity";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:child_process")>(),
+  spawn: vi.fn(),
+}));
 
 let appData = "";
 let installDir = "";
@@ -181,6 +188,7 @@ afterEach(() => {
   // 解析），让断言看到别人的消息——曾经导致「声明体积不符」用例偶发失败。
   // 这里不要写「等 phase 离开 downloading」的兜底轮询：有用例（本次进程自己发起的
   // downloading 不会被误判为中断）就是故意停在 downloading 的，会被白等超时。
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   unlockUpdate();
   if (previousEnv === undefined) delete process.env.PAPERMATE_APP_DATA;
@@ -458,5 +466,63 @@ describe.skipIf(!WINDOWS_X64)("编码不变式（中文安装路径）", () => {
     beginDownload();
     await waitForPhase("ready");
     expect(hasBom(path.join(updatesDir(), "job.json"))).toBe(true);
+  });
+});
+
+describe.skipIf(!WINDOWS_X64)("安装助手失败恢复", () => {
+  it("复制助手失败后释放模型请求锁并报告错误", () => {
+    writeStatus({ phase: "ready" });
+    expect(() => installUpdate()).toThrow();
+    expect(updateStatus().phase).toBe("error");
+    const finish = beginModelRequest(); finish();
+  });
+  it("从安装目录外启动，写入日志，并捕获助手的非正常退出", () => {
+    mkdirSync(path.join(installDir, "scripts"));
+    writeFileSync(path.join(installDir, "scripts", "apply-update.ps1"), "# 测试助手");
+    writeFileSync(path.join(installDir, "scripts", "launch-update.ps1"), "# 测试启动器");
+    writeStatus({ phase: "ready" });
+    const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
+    const spawn = vi.mocked(childProcess.spawn).mockReturnValue(child as unknown as ReturnType<typeof childProcess.spawn>);
+    const status = installUpdate();
+    expect(status.installProgress).toBe(0);
+    expect(status.helperPid).toBeUndefined();
+    expect(spawn.mock.calls[0][2]).toMatchObject({ cwd: updatesDir(), windowsHide: true, detached: false });
+    expect(hasBom(path.join(updatesDir(), "apply-update.ps1"))).toBe(true);
+    expect(existsSync(path.join(updatesDir(), "launcher.log"))).toBe(true);
+    child.emit("exit", 1);
+    expect(updateStatus().phase).toBe("error");
+    expect(updateStatus().message).toContain("退出码 1");
+    const finish = beginModelRequest(); finish();
+  });
+  it("终态错误释放更新锁，避免失败后仍不能提问", () => {
+    lockForUpdate();
+    writeStatus({ phase: "error", message: "助手失败" });
+    expect(updateStatus().phase).toBe("error");
+    const finish = beginModelRequest(); finish();
+  });
+});
+
+describe.skipIf(!WINDOWS_X64)("Windows 安装助手进程交接", () => {
+  it("启动器正常退出且交接 PID 时保持安装状态", () => {
+    mkdirSync(path.join(installDir, "scripts"));
+    for (const name of ["apply-update.ps1", "launch-update.ps1"]) writeFileSync(path.join(installDir, "scripts", name), "# fixture");
+    writeStatus({ phase: "ready" });
+    const child = Object.assign(new EventEmitter(), { pid: 999, unref: vi.fn() });
+    vi.mocked(childProcess.spawn).mockReturnValue(child as unknown as ReturnType<typeof childProcess.spawn>);
+    installUpdate();
+    writeFileSync(path.join(updatesDir(), "helper-pid.json"), "\uFEFF" + JSON.stringify({ helperPid: process.pid }));
+    child.emit("exit", 0);
+    expect(updateStatus().phase).toBe("installing");
+    expect(updateStatus().helperPid).toBe(process.pid);
+  });
+  it("退出码为 0 但缺少交接文件时报告明确错误", () => {
+    mkdirSync(path.join(installDir, "scripts"));
+    for (const name of ["apply-update.ps1", "launch-update.ps1"]) writeFileSync(path.join(installDir, "scripts", name), "# fixture");
+    writeStatus({ phase: "ready" });
+    const child = Object.assign(new EventEmitter(), { pid: 999, unref: vi.fn() });
+    vi.mocked(childProcess.spawn).mockReturnValue(child as unknown as ReturnType<typeof childProcess.spawn>);
+    installUpdate(); child.emit("exit", 0);
+    expect(updateStatus().phase).toBe("error");
+    expect(updateStatus().message).toContain("未交接");
   });
 });

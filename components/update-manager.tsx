@@ -84,7 +84,7 @@ export function CheckUpdateButton() {
         <p className="settings-hint">当前是源码运行或不支持的安装环境，只能检测版本；自动覆盖安装仅用于正式安装的 Windows x64 版本。</p>
       )}
       <div className="settings-websearch-actions">
-        <button type="button" className="test-key" onClick={() => window.dispatchEvent(new Event("papermate-check-update"))}>检查更新</button>
+        <button type="button" className="test-key" onClick={() => window.dispatchEvent(new Event(phase && UPDATE_ACTIVE_PHASES.includes(phase) ? "papermate-show-update" : "papermate-check-update"))}>{phase && UPDATE_ACTIVE_PHASES.includes(phase) ? "查看更新进度" : "检查更新"}</button>
         {status?.releaseUrl && <button type="button" className="test-key" onClick={() => window.open(status.releaseUrl, "_blank", "noopener")}>查看发布说明</button>}
       </div>
     </section>
@@ -97,6 +97,9 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
   const [authorized, setAuthorized] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState("");
+  const [connectionWarning, setConnectionWarning] = useState("");
+  const dismissed = useRef(false);
+  const lastContact = useRef(Date.now());
   const busyRef = useRef(busy);
   busyRef.current = busy;
   const prepareRef = useRef(prepare);
@@ -121,10 +124,10 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
     async function check(manual: boolean) {
       if (checking.current) return;
       checking.current = true;
-      if (manual) { setVisible(true); setError(""); }
+      if (manual) { dismissed.current = false; setVisible(true); setError(""); }
       try {
         const next = await action("check", { manual });
-        if (!disposed && (manual || next.phase === "available")) setVisible(true);
+        if (!disposed && !dismissed.current && (manual || next.phase === "available")) setVisible(true);
       } catch (failure) {
         if (manual && !disposed) setError(String(failure));
       } finally {
@@ -132,6 +135,8 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
       }
     }
     const manual = () => void check(true);
+    const show = () => { dismissed.current = false; setVisible(true); };
+    window.addEventListener("papermate-show-update", show);
     window.addEventListener("papermate-check-update", manual);
     if (!startupChecked) { startupChecked = true; void check(false); }
 
@@ -140,7 +145,11 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
       statusRef.current = next;
       setStatus(next);
       broadcast(next);
-      if (next.phase === "installing") { setVisible(true); setInstalling(true); }
+      lastContact.current = Date.now();
+      setConnectionWarning(next.phase === "installing" && next.updatedAt && Date.now() - next.updatedAt > 120000
+        ? "安装状态超过两分钟未更新。可关闭此窗口；请查看安装日志，勿重复启动安装。" : "");
+      if (next.phase === "installing") { if (!dismissed.current) setVisible(true); setInstalling(true); }
+      if (next.phase === "complete") { setInstalling(false); setAuthorized(false); installStarted.current = false; }
       if (next.phase === "complete" && mountedVersion.current !== next.currentVersion) window.location.reload();
       if (next.phase === "error") { setInstalling(false); setAuthorized(false); installStarted.current = false; }
     }
@@ -151,6 +160,11 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
       if (!document.hidden) {
         const next = await fetchStatus();
         if (next && !disposed) await apply(next);
+        else if (!disposed && statusRef.current?.phase === "installing") {
+          setConnectionWarning(Date.now() - lastContact.current > 90000
+            ? "暂时无法连接服务，无法确认安装结果。可关闭窗口并从启动快捷方式重新打开；不要重复安装。"
+            : "服务正在重启，暂时无法读取进度；连接恢复后会自动同步。");
+        }
       }
       schedule();
     }
@@ -169,6 +183,7 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("papermate-check-update", manual);
+      window.removeEventListener("papermate-show-update", show);
     };
   }, []);
 
@@ -191,26 +206,39 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
     })();
   }, [authorized, busy, status?.phase]);
 
-  if (!visible) return null;
+  function close() { dismissed.current = true; setVisible(false); }
+  useEffect(() => {
+    if (!visible) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dismissed.current = true; setVisible(false); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [visible]);
+  if (!visible) return installing || authorized ? <button className="papermate-update-resume" onClick={() => { dismissed.current = false; setVisible(true); }}>更新进行中 · 查看进度</button> : null;
   const inProgress = status?.phase === "downloading" || installing;
   const showLatest = status?.phase === "available" || status?.phase === "ready" || inProgress || status?.phase === "complete";
   return (
     <div className="papermate-update-overlay" role="dialog" aria-modal="true" aria-label="软件更新">
       <div className="papermate-update-card">
-        <h2>软件更新</h2>
+        <div className="papermate-update-heading"><h2>软件更新</h2><button type="button" aria-label="关闭软件更新" onClick={close}>×</button></div>
         <p>
           当前版本：{status?.currentVersion ?? "读取中…"}
           {showLatest && status?.latestVersion ? ` · 最新版本：${status.latestVersion}` : ""}
         </p>
         <p role="status">{error || (authorized && busy ? "等待当前任务完成后自动安装…" : status?.message || "正在检测更新…")}</p>
         {status?.notes && <pre>{status.notes}</pre>}
-        {status?.phase === "downloading" && <progress max={100} value={status.progress ?? 0} />}
+        {status?.phase === "downloading" && <div><label>下载进度：{status.progress ?? 0}%</label><progress aria-label="下载进度" max={100} value={status.progress ?? 0} /></div>}
+        {(installing || status?.phase === "complete") && <div className="papermate-install-progress">
+          <p>{status?.installStage || "正在保存数据并准备安装"}{status?.installProgress !== undefined ? " · " + status.installProgress + "%" : ""}</p>
+          <progress aria-label="安装进度" max={100} value={connectionWarning ? undefined : status?.phase === "complete" ? 100 : status?.installProgress ?? 0} />
+          <small>校验 → 解压 → 备份 → 替换 → 启动验证</small>
+        </div>}
+        {connectionWarning && <p role="status">{connectionWarning}</p>}
         {status && !status.supported && (
           <p>当前是源码运行或不支持的安装环境，可检测版本；自动覆盖安装仅支持正式安装的 Windows x64 版本。</p>
         )}
         {status?.releaseUrl && <a href={status.releaseUrl} target="_blank" rel="noreferrer">查看 GitHub 发布说明</a>}
         <div className="papermate-update-actions">
-          {!installing && <button onClick={() => { setVisible(false); }}>稍后</button>}
+          <button type="button" onClick={close}>{installing ? "关闭进度窗口" : "返回"}</button>
           {status?.supported && ["available", "ready"].includes(status.phase) && (
             <button disabled={authorized} onClick={() => {
               setError("");
@@ -222,7 +250,8 @@ export function UpdateManager({ busy, prepare }: { busy: boolean; prepare: () =>
           )}
           {!inProgress && <button onClick={() => window.dispatchEvent(new Event("papermate-check-update"))}>重新检测</button>}
         </div>
-        {installing && <p>正在安装和重启，完成后自动刷新页面。请勿关闭电脑。</p>}
+        {installing && <p>更新在后台继续。关闭此进度窗口不会取消安装；完成后自动刷新页面。请勿关闭电脑。</p>}
+        {status?.phase === "complete" && <button type="button" onClick={() => window.location.reload()}>刷新页面</button>}
       </div>
     </div>
   );

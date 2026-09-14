@@ -201,6 +201,8 @@ async function verify({ version }) {
     "public/prompts.txt",
     "public/buddy-personas.txt",
     "scripts/apply-update.ps1",
+    // 更新器实际 spawn 的是启动器，它必须随包分发，否则安装阶段会直接失败。
+    "scripts/launch-update.ps1",
     "scripts/start-papermate.ps1",
     "scripts/stop-papermate.ps1",
     "scripts/uninstall.ps1",

@@ -1,5 +1,5 @@
 import { lockForUpdate, unlockUpdate } from "./update-activity";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, copyFileSync, openSync, closeSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -108,7 +108,12 @@ function recoverStale(status: UpdateStatus): { status: UpdateStatus; changed: bo
       status: { ...status, phase: "idle", progress: undefined, message: "上次下载已中断，请重新检测更新。", updatedAt: now, ownerPid: process.pid },
     };
   }
-  if (status.phase === "installing" && status.updatedAt && now - status.updatedAt > INSTALL_STALE_MS) {
+  let helperExited = false;
+  if (status.phase === "installing" && status.helperPid && now - (status.helperStartedAt ?? now) > 15000) {
+    try { process.kill(status.helperPid, 0); } catch (error) { helperExited = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  }
+  if (status.phase === "installing" && (helperExited || (status.updatedAt && now - status.updatedAt > INSTALL_STALE_MS))) {
+    unlockUpdate();
     removeLock();
     return {
       changed: true,
@@ -124,6 +129,7 @@ export function updateStatus(): UpdateStatus {
   const recovered = recoverStale(memory);
   memory = recovered.changed ? withEnv(recovered.status) : recovered.status;
   if (recovered.changed) persist(memory);
+  if (["error", "complete"].includes(memory.phase)) unlockUpdate();
   return withEnv(memory);
 }
 
@@ -359,12 +365,43 @@ export function installUpdate() {
   const dir = root();
   if (!dir || updateStatus().phase !== "ready") throw new Error("更新包尚未就绪。");
   lockForUpdate();
-  const helper = path.join(dir, "apply-update.ps1");
-  copyFileSync(path.join(process.cwd(), "scripts", "apply-update.ps1"), helper);
-  setState({ phase: "installing", message: "正在安装并重启，请勿关闭电脑" });
-  const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helper, "-JobFile", path.join(dir, "job.json")],
-    { detached: true, stdio: "ignore", windowsHide: true });
-  child.on("error", (error) => { unlockUpdate(); setState({ phase: "error", message: error.message }); removeLock(); });
-  child.unref();
-  return updateStatus();
+  let logFd: number | undefined;
+  try {
+    const helper = path.join(dir, "apply-update.ps1");
+    const source = readFileSync(path.join(process.cwd(), "scripts", "apply-update.ps1"), "utf8").replace(/^\uFEFF/, "");
+    writeFileSync(helper, UTF8_BOM + source);
+    const launcher = path.join(dir, "launch-update.ps1");
+    writeFileSync(launcher, UTF8_BOM + readFileSync(path.join(process.cwd(), "scripts", "launch-update.ps1"), "utf8").replace(/^\uFEFF/, ""));
+    const handoffPath = path.join(dir, "helper-pid.json");
+    if (existsSync(handoffPath)) unlinkSync(handoffPath);
+    const logPath = path.join(dir, "launcher.log");
+    logFd = openSync(logPath, "w");
+    setState({ phase: "installing", installProgress: 0, installStage: "启动安装助手", helperPid: undefined,
+      helperStartedAt: Date.now(), message: "正在启动安装助手" });
+    // 助手必须在安装目录外运行，否则 Windows 会因工作目录仍被占用而拒绝替换。
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher, "-JobFile", path.join(dir, "job.json")],
+      { cwd: dir, detached: false, stdio: ["ignore", logFd, logFd], windowsHide: true });
+    const fail = (message: string) => {
+      if (readPersisted()?.phase !== "installing") return;
+      unlockUpdate();
+      setState({ phase: "error", message: message + "。诊断日志：" + logPath });
+      removeLock();
+    };
+    child.on("error", (error) => fail("无法启动安装助手：" + error.message));
+    child.on("exit", (code) => {
+      if (readPersisted()?.phase !== "installing") return;
+      if (code !== 0) { fail("安装启动器异常退出（退出码 " + code + "）"); return; }
+      try {
+        const handoff = JSON.parse(readFileSync(handoffPath, "utf8").replace(/^\uFEFF/, ""));
+        if (!Number.isSafeInteger(handoff.helperPid) || handoff.helperPid <= 0) throw new Error("无效的助手进程号");
+        setState({ helperPid: handoff.helperPid });
+      } catch { fail("启动器退出但未交接安装助手，请检查 launcher.log 和 install-error.log"); }
+    });
+    child.unref();
+    return updateStatus();
+  } catch (error) {
+    unlockUpdate(); removeLock();
+    setState({ phase: "error", message: error instanceof Error ? error.message : "启动安装失败" });
+    throw error;
+  } finally { if (logFd !== undefined) closeSync(logFd); }
 }

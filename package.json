@@ -1,6 +1,6 @@
 {
   "name": "papermate",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "description": "Local-first AI-assisted PDF reader for academic papers.",
   "license": "MIT",
   "engines": {

@@ -2,6 +2,26 @@
 
 All notable changes to PaperMate are documented in this file.
 
+## [4.1.0] - 2026-08-16
+
+### Fixed
+
+- **In-app update could not replace the program files.** `installUpdate()` spawned the update helper directly with the install directory as the child's working directory. Windows refuses to replace files while a process still holds that directory, so the swap failed. The updater now writes a separate launcher (`scripts/launch-update.ps1`) into the updates directory — outside the install directory — and starts it from there; the launcher runs the real helper with `-WorkingDirectory` set to the updates directory and redirects its output to `install.log` / `install-error.log`, then hands the helper PID back through `helper-pid.json` (`lib/updater.ts`, `scripts/apply-update.ps1`).
+- **A failed update left the app unusable.** The helper's exit was not observed, so the app could stay in `installing` forever, and the update lock was never released — after a failed update the user could no longer ask questions. An abnormal launcher exit now reports the exit code together with the diagnostic log path, a launcher that exits without handing over a PID reports that too, and every failure path releases the update lock and clears the lock file.
+- Narrow-screen collapsing only changed opacity, so a "collapsed" sidebar kept occupying layout space. Collapsed sidebars are now removed from the grid and release their column.
+- The reader re-rendered the PDF continuously while a sidebar was toggled or a width was dragged. The three-column layout now starts at its final widths, and the reader waits for the layout to settle (120 ms debounce plus an animation frame) before committing the new width (`components/pdf-reader.tsx`, `app/globals.css`).
+
+### Added
+
+- **Install-stage progress.** The update helper reports milestones (`installStage` / `installProgress`) as it works — verify, extract, stop service, back up, preserve data, replace files, start, health-check, complete — and also reports when it is rolling back, so the install phase has its own progress bar next to the download bar (`scripts/apply-update.ps1`, `lib/update-types.ts`).
+- A resumable update window: closing the dialog (button or `Esc`) leaves an "更新进行中 · 查看进度" button in the corner instead of hiding the update, and the settings button becomes "查看更新进度" while an update is active.
+- Connection warnings while the app cannot be reached: a stall message if the install status has not advanced for two minutes, and a restart message if the service has been unreachable for 90 seconds — both telling the user to close the window rather than start the install again.
+- A "刷新页面" button once the update reports `complete`.
+
+### Changed
+
+- The release package checks now assert `scripts/launch-update.ps1`, the file the updater actually spawns, so a packaging regression fails the build instead of failing on a user's machine (`scripts/package-update.mjs`, `.github/workflows/release.yml`).
+
 ## [4.0.1] - 2026-08-16
 
 ### Fixed

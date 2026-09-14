@@ -318,13 +318,13 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .paper-title span { color: var(--muted); font-family: var(--font-mono); font-size: 10px; }
 .header-actions { display: flex; align-items: center; gap: 11px; }
 .compact-notice { max-width: 310px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent-muted); font-size: 11px; }
-.workspace-grid { position: relative; display: grid; grid-template-columns: 224px minmax(430px, 1fr) 382px; height: calc(100vh - 52px); transition: grid-template-columns .3s cubic-bezier(.4, 0, .2, 1); }
+.workspace-grid { position: relative; display: grid; grid-template-columns: 224px minmax(430px, 1fr) 382px; height: calc(100vh - 52px); /* 列宽直接到位，避免动画期间触发 PDF 连续重绘。 */ }
 /* 拖拽调整宽度期间（body 标记 papermate-resizing）关闭过渡，
    否则 grid 列宽与拖拽手柄会逐帧追赶 0.3s 动画，造成面板延后卡顿；
    折叠/展开的动画不受影响。 */
 body.papermate-resizing .workspace-grid,
 body.papermate-resizing .resize-handle { transition: none; }
-.left-sidebar { position: relative; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--line); background: var(--sidebar-bg); padding: 20px 13px 13px; transition: padding .3s cubic-bezier(.4, 0, .2, 1), border-color .3s ease; }
+.left-sidebar { position: relative; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--line); background: var(--sidebar-bg); padding: 20px 13px 13px; transition: border-color .3s ease; }
 .left-sidebar-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .left-sidebar.collapsed { padding: 0; border-right: 0; overflow: hidden; }
 .left-sidebar > *, .assistant-panel > * { transition: opacity .18s ease; }
@@ -528,7 +528,7 @@ body.papermate-resizing .resize-handle { transition: none; }
 
 .assistant-panel { position: relative; display: flex; flex-direction: column; min-width: 0; overflow: hidden; border-left: 1px solid var(--line); background: var(--panel); transition: border-color .3s ease; }
 .assistant-panel.collapsed { border-left: 0; overflow: hidden; }
-.resize-handle { position: absolute; z-index: 8; top: 0; bottom: 0; width: 10px; cursor: col-resize; touch-action: none; transition: left .3s cubic-bezier(.4, 0, .2, 1), right .3s cubic-bezier(.4, 0, .2, 1); }
+.resize-handle { position: absolute; z-index: 8; top: 0; bottom: 0; width: 10px; cursor: col-resize; touch-action: none;  }
 .resize-handle.left { left: calc(var(--left-panel-width, 224px) - 5px); }
 .resize-handle.right { right: calc(var(--right-panel-width, 382px) - 5px); }
 .resize-handle::before { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: transparent; transition: background .15s; }
@@ -2765,3 +2765,18 @@ body::after {
 .papermate-update-card progress { width: 100%; }
 .papermate-update-actions { display: flex; gap: 12px; margin-top: 18px; }
 .papermate-update-actions button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+
+/* 窄屏折叠必须释放布局空间，不能只改变透明度。 */
+@media (min-width: 591px) and (max-width: 820px) {
+  .workspace-grid > .reader-wrap { grid-column: 2; grid-row: 1; }
+  .workspace-grid:has(> .left-sidebar.collapsed) { grid-template-columns: 0 minmax(0, 1fr); }
+}
+@media (max-width: 820px) {
+  .workspace-grid > .left-sidebar.collapsed,
+  .workspace-grid > .assistant-panel.collapsed { display: none; min-height: 0; padding: 0; overflow: hidden; }
+}
+
+.papermate-update-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.papermate-update-heading button { flex:none; width:36px; height:36px; border:1px solid var(--line); border-radius:8px; background:var(--panel-2); font-size:24px; }
+.papermate-update-resume { position:fixed; right:20px; bottom:20px; z-index:10001; padding:10px 16px; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--ink); box-shadow:0 4px 20px #0002; }
+.papermate-install-progress { padding:12px 0; }
