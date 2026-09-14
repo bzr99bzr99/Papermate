@@ -136,7 +136,7 @@ export function mergeModelOptions(
 }
 
 /** 自定义模型输入（params/deepParams 允许 JSON 字符串，由校验函数统一解析）。 */
-export type CustomModelInput = Partial<Omit<CustomModelConfig, "params" | "deepParams">> & {
+type CustomModelInput = Partial<Omit<CustomModelConfig, "params" | "deepParams">> & {
   params?: Record<string, unknown> | string;
   deepParams?: Record<string, unknown> | string;
 };

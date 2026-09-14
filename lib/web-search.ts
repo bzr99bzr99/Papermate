@@ -16,14 +16,14 @@ export type WebSearchMode = "off" | "auto" | "force";
 export type WebSearchProviderId = "zhipu" | "bocha" | "tavily" | "custom";
 
 /** 智谱搜索引擎档位（价格来自官方价格表：0.01 / 0.03 / 0.05 元每次）。 */
-export type ZhipuSearchEngine = "search_std" | "search_pro" | "search_pro_sogou" | "search_pro_quark";
+type ZhipuSearchEngine = "search_std" | "search_pro" | "search_pro_sogou" | "search_pro_quark";
 
-export type WebSearchRecency = "noLimit" | "oneDay" | "oneWeek" | "oneMonth" | "oneYear";
+type WebSearchRecency = "noLimit" | "oneDay" | "oneWeek" | "oneMonth" | "oneYear";
 
-export type WebSearchContentSize = "medium" | "high";
+type WebSearchContentSize = "medium" | "high";
 
 /** 与 PromptKind / ArtifactKind 对齐（此处独立声明，避免与 lib/types.ts 形成循环依赖）。 */
-export type WebSearchTaskKind =
+type WebSearchTaskKind =
   | "translate"
   | "context"
   | "concept"
@@ -64,9 +64,9 @@ export interface RawWebSearchSource {
   publishedAt?: unknown;
 }
 
-export const WEB_SEARCH_MAX_RESULTS = 8;
-export const WEB_SEARCH_SNIPPET_LIMIT = 500;
-export const WEB_SEARCH_BLOCK_LIMIT = 6000;
+const WEB_SEARCH_MAX_RESULTS = 8;
+const WEB_SEARCH_SNIPPET_LIMIT = 500;
+const WEB_SEARCH_BLOCK_LIMIT = 6000;
 export const WEB_SEARCH_TIMEOUT_MS = 8000;
 export const WEB_SEARCH_QUERY_LIMIT = 200;
 
@@ -80,7 +80,7 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
   contentSize: "medium",
 };
 
-export interface WebSearchProviderMeta {
+interface WebSearchProviderMeta {
   id: WebSearchProviderId;
   label: string;
   /** 是否可以复用聊天用的智谱 Key（只有 zhipu 可以）。 */
@@ -361,7 +361,7 @@ export function parseSearchResponse(provider: WebSearchProviderId, payload: unkn
   }
 }
 
-export function hostnameOf(url: string): string {
+function hostnameOf(url: string): string {
   try {
     return new URL(url).hostname.replace(/^www\./i, "");
   } catch {

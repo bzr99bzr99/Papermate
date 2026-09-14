@@ -29,7 +29,7 @@ export function isNewerVersion(candidate: string, current: string): boolean {
  * 所以下载地址的信任校验必须同时接受这两个名字，否则真实附件会被判为不可信。
  */
 export const UPDATE_REPOSITORY = "bzr99bzr99/Papermatev1.0";
-export const UPDATE_REPOSITORY_ALIASES = ["bzr99bzr99/Papermatev1.0", "bzr99bzr99/Papermate"];
+const UPDATE_REPOSITORY_ALIASES = ["bzr99bzr99/Papermatev1.0", "bzr99bzr99/Papermate"];
 
 /** Windows 预构建更新包的文件名（必须与 .github/workflows/release.yml 产物一致）。 */
 export const UPDATE_ASSET = "papermate-windows-x64.zip";
@@ -105,7 +105,7 @@ export function htmlToPlainText(html: string): string {
     .trim();
 }
 
-export interface AtomRelease {
+interface AtomRelease {
   tag: string;
   title: string;
   publishedAt?: string;

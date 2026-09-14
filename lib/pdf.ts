@@ -10,7 +10,7 @@ import type {
   TextAnchor,
 } from "@/lib/types";
 
-export function shortHash(value: string) {
+function shortHash(value: string) {
   let hash = 5381;
   for (let index = 0; index < value.length; index += 1) {
     hash = (hash * 33) ^ value.charCodeAt(index);
@@ -55,7 +55,7 @@ export function makeAnchor(
   };
 }
 
-export interface AnchorExcerptParts {
+interface AnchorExcerptParts {
   head: string;
   tail: string;
   truncated: boolean;
@@ -187,7 +187,7 @@ export function pagesHaveSelectableText(
   );
 }
 
-export interface PageLinkStats {
+interface PageLinkStats {
   /** 链接注解总数。 */
   total: number;
   /** 页内跳转链接数（引用/图表跳转到目标页）。 */
@@ -235,9 +235,9 @@ export function countPageLinks(
 export const MAX_SELECTION_FRAGMENTS = 20;
 export const MIN_READER_ZOOM = 0.5;
 export const MAX_READER_ZOOM = 3;
-export const READER_ZOOM_STEP = 0.1;
-export const READER_ZOOM_WHEEL_SENSITIVITY = 0.0012;
-export const READER_ZOOM_WHEEL_LINE_HEIGHT = 16;
+const READER_ZOOM_STEP = 0.1;
+const READER_ZOOM_WHEEL_SENSITIVITY = 0.0012;
+const READER_ZOOM_WHEEL_LINE_HEIGHT = 16;
 
 export function clampReaderZoom(value: number): number {
   if (!Number.isFinite(value)) return 1;
@@ -270,7 +270,7 @@ export function continuousReaderZoom(value: number, deltaPixels: number): number
   return clampReaderZoom(value * Math.exp(-deltaPixels * READER_ZOOM_WHEEL_SENSITIVITY));
 }
 
-export interface PdfTextLine {
+interface PdfTextLine {
   text: string;
   top: number;
   x?: number;
@@ -287,14 +287,9 @@ export interface PdfOutlineNode {
   items?: PdfOutlineNode[];
 }
 
-export interface PdfPageReference {
+interface PdfPageReference {
   num: number;
   gen: number;
-}
-
-export interface TextLineCluster {
-  lines: PdfTextLine[];
-  items: PdfTextItem[];
 }
 
 function normalizeTextItemTransform(item: PdfTextItem): [number, number, number, number, number, number] {
@@ -1013,7 +1008,7 @@ function buildSingleAnchorContext(
   ].join("\n");
 }
 
-export const FULL_PAPER_DIGEST_CHARS = 60000;
+const FULL_PAPER_DIGEST_CHARS = 60000;
 const FULL_PAPER_MIN_DIGEST_CHARS = 8000;
 const CONTEXT_SECTION_PARAGRAPHS = 3;
 const CONTEXT_SPECIAL_SECTION_PARAGRAPHS = 5;

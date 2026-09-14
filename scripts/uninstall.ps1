@@ -94,12 +94,25 @@ elseif ($installedCopy) {
     if ($sourceProjectDir) {
         $sourceFull = [System.IO.Path]::GetFullPath($sourceProjectDir).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     }
+    # 两种安装都要能卸干净：
+    #   * 源码安装：目录里有 .papermate-installed.json；
+    #   * 预编译包安装：目录里有 papermate-version.json（打包时写入）+ server.js + node.exe。
+    $hasSourceMarker = Test-Path -LiteralPath (Join-Path $projectFull ".papermate-installed.json")
+    $looksLikePackage = (Test-Path -LiteralPath (Join-Path $projectFull "papermate-version.json")) -and
+        (Test-Path -LiteralPath (Join-Path $projectFull "server.js")) -and
+        (Test-Path -LiteralPath (Join-Path $projectFull "node.exe"))
+
+    # 受保护路径 = 磁盘根目录，或“安装目录就是源码目录本身”（源码就地安装，绝不能删）。
+    # 注意：预编译包安装的 config.json 里 sourceProjectDir 也等于安装目录自身（它没有外部源码），
+    # 那种情况必须允许删除，否则卸载会留下一整份程序文件——判断时用 $looksLikePackage 排除掉。
+    $sameAsSource = $sourceFull -and [System.String]::Equals($sourceFull, $trimmedProject, [System.StringComparison]::OrdinalIgnoreCase)
     $isProtectedPath = [System.String]::Equals($driveRoot, $trimmedProject, [System.StringComparison]::OrdinalIgnoreCase) -or
-        ($sourceFull -and [System.String]::Equals($sourceFull, $trimmedProject, [System.StringComparison]::OrdinalIgnoreCase))
+        ($sameAsSource -and -not $looksLikePackage)
+
     if ($isProtectedPath) {
         Write-Host "已跳过受保护路径的删除操作：$projectFull" -ForegroundColor Yellow
     }
-    elseif (-not (Test-Path -LiteralPath (Join-Path $projectFull ".papermate-installed.json"))) {
+    elseif (-not ($hasSourceMarker -or $looksLikePackage)) {
         Write-Host "安装位置中没有找到 PaperMate 安装标记，已跳过目录清理：$projectFull" -ForegroundColor Yellow
     }
     else {

@@ -72,11 +72,13 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 - Custom model configurations (including API keys) live in `data/models.json`, and the web-search configuration lives in `data/search.json`, on this machine (plain text; `data/` is not committed to Git) and are not included in backups or exports.
 - `data/`, `.env*`, and `papermate-backup-*.json` are ignored by `.gitignore`, so your papers, API keys, and exported backups are never pushed to GitHub accidentally.
 
-### Windows One-Click Install / Update / Uninstall
+### Windows Install / Update / Uninstall
 
-- Fresh install: choose an install location; the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
-- Update: running `一键安装.bat` again detects the installed version and updates it incrementally (skipping copy and rebuild when the source is unchanged) while preserving the `data` folder.
+- **Prebuilt package install (recommended)** - download `papermate-windows-x64.zip` from GitHub Releases, extract it, and double-click `一键安装.bat`. No Node.js, no npm, no internet needed: the package bundles `node.exe`. Overwriting an existing install first moves the old folder to `.papermate-backup-<guid>` and preserves `data` plus any `public/*.txt` you edited.
+- Fresh install (from source): choose an install location; the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
+- Update (from source): running `一键安装.bat` or `一键升级.bat` again detects the installed version and updates it incrementally (skipping copy and rebuild when the source is unchanged) while preserving the `data` folder.
 - Uninstall: available from the Start menu, install directory, or Windows Settings; the `data` directory is preserved by default.
+- **Development: one-click deploy** - `一键升级.bat` deploys your local source into the installed app (a prebuilt-package install receives only the runtime output: `.next`, `server.js`, `package.json`, five runtime scripts: apply-update, launch-update, start-papermate, stop-papermate, uninstall; a source install gets an incremental source upgrade), so a change is live within about a minute; `upgrade-local.ps1 -Undo` rolls back, with backups under `%LOCALAPPDATA%\PaperMate\dev-backups\`. The development version number is fixed at 1.
 
 ### In-App Auto Update
 
@@ -94,8 +96,8 @@ Windows one-click installation is documented in [安装说明.md](安装说明.m
 
 ## Requirements
 
-- Node.js 22.5 or newer (Node.js LTS recommended)
-- npm
+- Node.js 22.5 or newer (Node.js LTS recommended) - only for **source installs** and development; the prebuilt package bundles `node.exe`
+- npm (only for source installs and development)
 - A [DeepSeek API key](https://platform.deepseek.com/), a free [Zhipu GLM API key](https://open.bigmodel.cn/), or a [Kimi API key](https://platform.moonshot.cn/) for model requests (any one)
 - Windows 10/11 for the one-click installer; manual development works on any OS supported by Node.js and Next.js
 
@@ -108,10 +110,12 @@ npm run dev
 
 Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, Zhipu GLM, or Kimi API key, and verify the connection.
 
-## Windows One-Click Install
+## Windows Install
 
-- **Fresh install (no existing version)** - Double-click `一键安装.bat`, choose an install location, and the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
-- **Overwrite install (existing version detected)** - Double-click `一键安装.bat` again; once an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, it directly overwrites with the new version while preserving the `data` folder, without asking for a location again. No separate upgrade script is needed; updates are incremental and skip copying/rebuilding when the source is unchanged.
+- **Prebuilt package (recommended, no Node.js needed)** - download `papermate-windows-x64.zip` from GitHub Releases, extract it, and double-click `一键安装.bat`; pick an install location and it finishes in seconds. The package bundles `node.exe` so it works offline, and overwriting an existing install first backs the old folder up to `.papermate-backup-<guid>` while preserving `data` and any `public/*.txt` you edited.
+- **Fresh install from source (no existing version)** - double-click `一键安装.bat`, choose an install location, and the installer copies the project, installs dependencies, builds the production app, and creates shortcuts.
+- **Overwrite install from source (existing version detected)** - double-click `一键安装.bat` or `一键升级.bat` again; once an existing install is detected in `%LOCALAPPDATA%\PaperMate\config.json`, it overwrites with the new version while preserving the `data` folder, without asking for a location again. Updates are incremental and skip copying/rebuilding when the source is unchanged. Note: for a prebuilt package install, `一键升级.bat` switches to the development-deploy path (runtime overlay only), which needs a complete development source checkout; with just the extracted release zip, use in-app update.
+- **Development testing** - `一键升级.bat` deploys the development build into the installed app (runtime overlay or incremental source upgrade, chosen automatically from the install type), so a change is live within about a minute; `upgrade-local.ps1 -Undo` rolls it back. The development version number is fixed at 1.
 - Uninstall is available from the Start menu, the install directory, or Windows Settings. See [INSTALL.md](INSTALL.md) and [安装说明.md](安装说明.md) for details.
 
 ## Usage
@@ -166,6 +170,9 @@ Open `http://localhost:3000`, click **设置 / Settings**, enter your DeepSeek, 
 ## Project Structure
 
 ```text
+一键安装.bat  install (auto-detects: an extracted package installs without Node, a source tree installs/upgrades from source)
+一键升级.bat  upgrade (source tree -> deploy into the installed app; source install -> incremental upgrade)
+一键卸载.bat  uninstall (keeps the data folder by default)
 app/          Next.js App Router pages and API routes
 components/   PDF reader and UI components
 lib/          PDF parsing, storage, backup, mind maps, and tests

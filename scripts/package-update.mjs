@@ -108,8 +108,9 @@ async function build() {
   for (const name of ["public", "scripts"]) {
     await cp(path.join(root, name), guard(path.join(target, name)), { recursive: true, force: true });
   }
-  // 3) 顶层文件
-  for (const name of ["package.json", "papermate.ico", "papermate.png", "papermate-uninstall.ico"]) {
+  // 3) 顶层文件（含预编译包自带的安装/卸载入口：用户下载 zip 解压后双击「一键安装.bat」即可安装，
+  //    不需要 Node；「一键卸载.bat」让安装目录自己也能卸载，不必依赖开始菜单快捷方式）
+  for (const name of ["package.json", "papermate.ico", "papermate.png", "papermate-uninstall.ico", "一键安装.bat", "一键卸载.bat"]) {
     if (await exists(path.join(root, name))) await cp(path.join(root, name), guard(path.join(target, name)), { force: true });
   }
   // 4) 便携 Node：正式安装不要求用户装 Node
@@ -129,6 +130,10 @@ async function build() {
   for (const name of FORBIDDEN) await rm(guard(path.join(target, name)), { recursive: true, force: true });
   for (const name of FORBIDDEN_FILES) await rm(guard(path.join(target, name)), { force: true });
   await rm(guard(path.join(target, ".next", "cache")), { recursive: true, force: true });
+  // 开发专用脚本不进包：预编译安装里没有源码，quick-patch（本地源码打补丁）对用户没有意义。
+  for (const name of ["scripts/quick-patch.ps1"]) {
+    await rm(guard(path.join(target, name)), { force: true });
+  }
   for (const file of await walk(target)) {
     if (/(^|\/)\.env(\.|$)/.test(file.path) || /\.test\.(ts|tsx|mjs|js)$/.test(file.path) || file.path.endsWith(".tsbuildinfo")) {
       await rm(guard(path.join(target, file.path)), { force: true });
@@ -206,6 +211,10 @@ async function verify({ version }) {
     "scripts/start-papermate.ps1",
     "scripts/stop-papermate.ps1",
     "scripts/uninstall.ps1",
+    "scripts/install-package.ps1",
+    // 用户拿到 zip 之后的两个入口：装和卸。缺了用户就没有安装入口（或只能从开始菜单卸载）。
+    "一键安装.bat",
+    "一键卸载.bat",
   ];
   for (const name of required) {
     const ok = paths.has(name) || files.some((file) => file.path.startsWith(name + "/"));

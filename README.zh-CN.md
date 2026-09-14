@@ -71,11 +71,13 @@ Windows 一键安装详见 [安装说明.md](安装说明.md) 和 [INSTALL.md](I
 - 自定义模型配置（含 API Key）保存在本机 `data/models.json`，联网搜索配置保存在 `data/search.json`（均为明文，`data/` 不提交 Git），不写入备份与导出文件。
 - `.gitignore` 已排除 `data/`、`.env*` 与 `papermate-backup-*.json`，本机论文、API Key 与导出的备份不会误推到 GitHub。
 
-### Windows 一键安装/更新/卸载
+### Windows 安装/更新/卸载
 
-- 全新安装：选择安装位置，自动复制项目、安装依赖、构建正式版本并创建快捷方式。
-- 更新：再次双击 `一键安装.bat`，自动检测旧版本并增量更新（源码无变化时跳过复制与构建），保留 `data` 数据。
+- **预编译包安装（推荐普通用户）**：从 GitHub Releases 下载 `papermate-windows-x64.zip`，解压后双击 `一键安装.bat`，选择安装位置即可。不需要 Node.js / npm，也不需要联网——包内自带 `node.exe`；覆盖安装会先把旧目录备份成 `.papermate-backup-<guid>`，并保留 `data` 与你改过的 `public/*.txt`。
+- 全新安装（源码）：选择安装位置，自动复制项目、安装依赖、构建正式版本并创建快捷方式。
+- 更新（源码）：再次双击 `一键安装.bat` 或 `一键升级.bat`，自动检测旧版本并增量更新（源码无变化时跳过复制与构建），保留 `data` 数据。
 - 卸载：可从开始菜单、安装目录或 Windows 设置进入，默认保留 `data` 目录。
+- **开发：一键部署**：`一键升级.bat` 把本地源码的改动直接部署到已安装的 PaperMate（预编译包安装只覆盖 `.next`、`server.js`、`package.json`，外加 apply-update / launch-update / start-papermate / stop-papermate / uninstall 这 5 个运行时脚本；源码安装走增量升级），约 1 分钟看到效果；`upgrade-local.ps1 -Undo` 可回滚，备份在 `%LOCALAPPDATA%\PaperMate\dev-backups\`。开发版版本号固定为 1。
 
 ### 应用内自动更新
 
@@ -93,8 +95,8 @@ Windows 一键安装详见 [安装说明.md](安装说明.md) 和 [INSTALL.md](I
 
 ## 环境要求
 
-- Node.js 22.5 或更高版本（建议 Node.js LTS）
-- npm
+- Node.js 22.5 或更高版本（建议 Node.js LTS）——仅**源码安装**与开发需要；预编译包安装自带 `node.exe`
+- npm（仅源码安装与开发需要）
 - DeepSeek / 智谱 GLM（免费）/ Kimi API Key，用于模型请求，任选其一；如需联网搜索，另需搜索服务商 Key（默认复用智谱 Key）
 - 一键安装脚本需要 Windows 10/11；手动开发可在任意支持 Node.js 与 Next.js 的系统上运行
 
@@ -107,10 +109,12 @@ npm run dev
 
 打开 `http://localhost:3000`，点击"设置"，输入 DeepSeek、智谱 GLM 或 Kimi 的 API Key 并验证连接。
 
-## Windows 一键安装
+## Windows 安装
 
-- **全新安装（无旧版本）**：双击 `一键安装.bat`，选择安装位置，安装器自动复制项目、安装依赖、构建正式版本并创建快捷方式。
-- **覆盖安装（有旧版本）**：再次双击 `一键安装.bat`，检测到 `%LOCALAPPDATA%\PaperMate\config.json` 中的已安装版本后，直接覆盖安装新版并保留 `data` 数据文件夹，无需重新选择安装位置（不再需要单独的升级脚本；源码无变化时自动跳过复制与构建，增量更新更快）。
+- **预编译包安装（推荐，不需要 Node.js）**：到 GitHub Releases 下载 `papermate-windows-x64.zip`，解压后双击 `一键安装.bat` → 选择安装位置即可，几十秒装完。包内自带 `node.exe`，离线也能装；覆盖安装会先把旧目录备份成 `.papermate-backup-<guid>`，并保留 `data` 与你改过的 `public/*.txt`。
+- **全新安装（源码，无旧版本）**：双击 `一键安装.bat`，选择安装位置，安装器自动复制项目、安装依赖、构建正式版本并创建快捷方式。
+- **覆盖安装（源码，有旧版本）**：再次双击 `一键安装.bat` 或 `一键升级.bat`，检测到 `%LOCALAPPDATA%\PaperMate\config.json` 中的已安装版本后，直接覆盖安装新版并保留 `data` 数据文件夹，无需重新选择安装位置（源码无变化时自动跳过复制与构建，增量更新更快）。注意：如果安装目录是预编译包安装，`一键升级.bat` 会改走“开发版部署”（只覆盖运行时产物），前提是当前目录是完整开发版源码；只有 Release 解压包时请用应用内更新。
+- **开发测试**：`一键升级.bat` 把开发版部署到已安装的 PaperMate（按安装形态自动选“覆盖运行时产物”或源码增量升级），约 1 分钟看到改动效果，`upgrade-local.ps1 -Undo` 可回滚；开发版版本号固定为 1。
 - 卸载可以从开始菜单、安装目录或 Windows 设置进入。详细步骤见 [安装说明.md](安装说明.md) 和 [INSTALL.md](INSTALL.md)。
 
 ## 使用方式
@@ -165,6 +169,9 @@ npm run dev
 ## 项目结构
 
 ```text
+一键安装.bat  安装（自动区分：预编译包目录走免 Node 安装，源码目录走源码安装/增量升级）
+一键升级.bat  升级（源码目录 → 部署到已安装的 PaperMate；源码安装 → 增量升级）
+一键卸载.bat  卸载（默认保留 data 数据）
 app/          Next.js App Router 页面和 API 路由
 components/   PDF 阅读器与界面组件
 lib/          PDF 解析、存储、备份、脑图和测试

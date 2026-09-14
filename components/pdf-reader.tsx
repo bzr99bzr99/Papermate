@@ -43,6 +43,7 @@ import {
   textLinesFromItems,
 } from "@/lib/pdf";
 import type { PdfOutlineNode } from "@/lib/pdf";
+import { buildSelectionQuote, selectItemIndexes, type SelectionItemBox } from "@/lib/selection-range";
 import type {
   CitationTarget,
   Conversation,
@@ -403,6 +404,8 @@ const ZOOM_COMMIT_IDLE_MS = 400;
 const MAX_RASTER_PIXELS = 12_000_000;
 const RASTER_ZOOM_OVERSCAN = 1.25;
 const CLICK_MOVE_THRESHOLD = 5;
+/** 划选时指针 Y 的容差：指针常停在行上沿或两行之间，留一点余量避免整行漏选。 */
+const SELECTION_POINTER_TOLERANCE = 4;
 
 interface PendingZoomAnchor {
   page: number;
@@ -472,17 +475,6 @@ type SelectionRectBounds = Pick<
   "itemIndexes" | "textItemStart" | "textItemEnd" | "textStartOffset" | "textEndOffset"
 >;
 
-function rectIntersection(
-  first: Pick<ClientRectLike, "left" | "right" | "top" | "bottom">,
-  second: Pick<ClientRectLike, "left" | "right" | "top" | "bottom">,
-): ClientRectLike | undefined {
-  const left = Math.max(first.left, second.left);
-  const top = Math.max(first.top, second.top);
-  const right = Math.min(first.right, second.right);
-  const bottom = Math.min(first.bottom, second.bottom);
-  if (right <= left || bottom <= top) return undefined;
-  return { left, top, right, bottom, width: right - left, height: bottom - top };
-}
 
 function rectDistanceToPoint(
   rect: Pick<ClientRectLike, "left" | "right" | "top" | "bottom">,
@@ -748,69 +740,40 @@ function selectionItemsBetweenPoints(
   const lowOffset = Math.min(Math.max(0, lowPoint.offset), items[lowIndex]?.str.length ?? 0);
   const highOffset = Math.min(Math.max(0, highPoint.offset), items[highIndex]?.str.length ?? 0);
 
-  const lowSpan = stack.querySelector<HTMLElement>(`[data-text-item-index="${lowIndex}"]`);
-  const highSpan = stack.querySelector<HTMLElement>(`[data-text-item-index="${highIndex}"]`);
-  const lowRect = lowSpan?.getBoundingClientRect();
-  const highRect = highSpan?.getBoundingClientRect();
-  const minY = Math.min(start.clientY, end.clientY) - 2;
-  const maxY = Math.max(start.clientY, end.clientY) + 2;
-
-  let columnLeft = Math.min(lowRect?.left ?? 0, highRect?.left ?? 0) - 6;
-  let columnRight = Math.max(lowRect?.right ?? 0, highRect?.right ?? 0) + 6;
-  if (lowRect && highRect) {
-    const overlap = rectIntersection(lowRect, highRect);
-    const sameColumn =
-      overlap &&
-      overlap.width >
-        Math.min(lowRect.width, highRect.width) * 0.35;
-    if (sameColumn) {
-      columnLeft = Math.max(lowRect.left, highRect.left) - 4;
-      columnRight = Math.min(lowRect.right, highRect.right) + 4;
-    }
-  }
-
-  const itemIndexes: number[] = [];
+  // 收集区间内文本项的屏幕矩形，交给纯函数决定选哪些项。
+  // 划选取值曾有两个隐蔽 bug（丢内容、整行选不全），细节与回归测试见 lib/selection-range.ts。
+  const boxes: SelectionItemBox[] = [];
   for (let index = lowIndex; index <= highIndex; index += 1) {
-    const item = items[index];
+    if (!items[index]) continue;
     const span = stack.querySelector<HTMLElement>(`[data-text-item-index="${index}"]`);
     const rect = span?.getBoundingClientRect();
-    if (!item || !rect || rect.width < 0.5 || rect.height < 0.5) continue;
-    const centerY = (rect.top + rect.bottom) / 2;
-    const centerX = (rect.left + rect.right) / 2;
-    const inside =
-      index === lowIndex ||
-      index === highIndex ||
-      (centerY >= minY &&
-        centerY <= maxY &&
-        centerX >= columnLeft &&
-        centerX <= columnRight);
-    if (inside) itemIndexes.push(index);
+    if (!rect || rect.width < 0.5 || rect.height < 0.5) continue;
+    boxes.push({ index, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
   }
+
+  const itemIndexes = selectItemIndexes({
+    boxes,
+    lowIndex,
+    highIndex,
+    // 指针可能停在行上沿/行间，留一点纵向容差
+    pointerTop: Math.min(start.clientY, end.clientY) - SELECTION_POINTER_TOLERANCE,
+    pointerBottom: Math.max(start.clientY, end.clientY) + SELECTION_POINTER_TOLERANCE,
+  });
   if (!itemIndexes.length) return undefined;
 
-  const quoteParts: string[] = [];
-  const blockIds: string[] = [];
-  for (let position = 0; position < itemIndexes.length; position += 1) {
-    const index = itemIndexes[position];
-    const item = items[index];
-    let value = item.str;
-    if (index === lowIndex) value = value.slice(lowOffset);
-    if (index === highIndex) value = value.slice(0, highOffset);
-    if (lowIndex === highIndex) value = item.str.slice(lowOffset, highOffset);
-    quoteParts.push(value);
-    if (item.hasEOL && position < itemIndexes.length - 1) quoteParts.push("\n");
-    if (item.blockId) blockIds.push(item.blockId);
-  }
-  const quote = quoteParts
-    .join("")
-    .replace(/[ \t\f\r]+/g, " ")
-    .replace(/ ?\n ?/g, "\n")
-    .trim();
+  const { quote, blockIds } = buildSelectionQuote({
+    items,
+    itemIndexes,
+    lowIndex,
+    highIndex,
+    lowOffset,
+    highOffset,
+  });
   if (!quote) return undefined;
 
   return {
     itemIndexes,
-    blockIds: [...new Set(blockIds)],
+    blockIds,
     quote,
     textItemStart: lowIndex,
     textItemEnd: highIndex,

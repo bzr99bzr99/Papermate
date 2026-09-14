@@ -18,7 +18,7 @@
  * - 两者都缺失时（curl 等非浏览器客户端）放行——浏览器威胁模型下不存在这种请求，
  *   而本机进程本来就能直接读 data/ 目录，不构成额外暴露面。
  */
-export interface UpdateRequestSignals {
+interface UpdateRequestSignals {
   /** 请求头 origin（可能是 null）。 */
   origin: string | null;
   /** 请求头 sec-fetch-site（可能是 null）。 */

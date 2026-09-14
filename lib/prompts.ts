@@ -27,7 +27,7 @@ export const WEB_SEARCH_PROMPT_DEFAULT = "本次请求额外附带了【联网�
  */
 const PROMPTS_FILE_RELATIVE_PATH = path.join("public", "prompts.txt");
 
-export type ParsedPrompts = Partial<Record<Task, string>> & { system?: string; websearch?: string };
+type ParsedPrompts = Partial<Record<Task, string>> & { system?: string; websearch?: string };
 
 export function parsePromptsFile(content: string): ParsedPrompts {
   const result: ParsedPrompts = {};
@@ -115,7 +115,7 @@ export function loadWebSearchPrompt(filePath?: string): string {
 export type BuddyPersona = "sarcastic" | "soft" | "philosopher" | "encourager" | "mentor";
 
 /** 各人格的内置默认提示词（buddy-personas.txt 缺失/不可读时回退）。 */
-export const BUDDY_PERSONA_DEFAULTS: Record<BuddyPersona, string> = {
+const BUDDY_PERSONA_DEFAULTS: Record<BuddyPersona, string> = {
   sarcastic:
     "你是 PaperMate 里的毒舌审稿人，尖锐挑刺、吐槽学术黑话、怀疑实验可信度，但内核是爱论文的傲娇审稿人。口语化、简短自然，别讲套话；结合当前场景与补充内容自由发挥，可以追问、可以挑刺、可以跑题，不限制思路方向。",
   soft:
@@ -129,7 +129,7 @@ export const BUDDY_PERSONA_DEFAULTS: Record<BuddyPersona, string> = {
 };
 
 /** 本地兜底语料：按 "事件|人格" 分组，每格多句，随机取用。 */
-export const BUDDY_FALLBACK_DEFAULT: Record<string, string[]> = {
+const BUDDY_FALLBACK_DEFAULT: Record<string, string[]> = {
   "paper-open|soft": ["哇，新论文！我要搬个小板凳认真记笔记。", "看起来又是一篇值得慢慢读的，我准备好了！"],
   "paper-open|sarcastic": ["又来一个新坑，让我闻闻是不是熟悉的配方。", "页数不少，希望内容配得上这份重量。"],
   "paper-open|philosopher": ["开卷。这缘分，像极了缘分。", "又一篇论文，先让我泡杯咖啡压压惊。"],
@@ -193,9 +193,9 @@ export const BUDDY_FALLBACK_DEFAULT: Record<string, string[]> = {
 
 const BUDDY_FILE_RELATIVE_PATH = path.join("public", "buddy-personas.txt");
 
-export type ParsedBuddy = Partial<Record<BuddyPersona | "fallback", string>>;
+type ParsedBuddy = Partial<Record<BuddyPersona | "fallback", string>>;
 
-export function parseBuddyFile(content: string): ParsedBuddy {
+function parseBuddyFile(content: string): ParsedBuddy {
   const result: ParsedBuddy = {};
   const validKeys = new Set<string>([...Object.keys(BUDDY_PERSONA_DEFAULTS), "fallback"]);
   const headerPattern = /^\[([a-z]+)\]\s*$/gm;
@@ -228,7 +228,7 @@ let buddyCacheMtimeMs = -1;
 let buddyCachePath = "";
 
 /** 解析 [fallback] 语料块：按 "事件|人格|句子" 分组。 */
-export function parseBuddyFallback(content: string): Record<string, string[]> {
+function parseBuddyFallback(content: string): Record<string, string[]> {
   const groups: Record<string, string[]> = {};
   for (const raw of content.split(/\r?\n/)) {
     const line = raw.trim();

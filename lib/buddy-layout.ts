@@ -1,7 +1,7 @@
 export const BUDDY_MIN_SCALE = 40;
 export const BUDDY_MAX_SCALE = 180;
 /* 尺寸量化步长（存储值对齐用）与按钮点击步长 */
-export const BUDDY_SCALE_STEP = 10;
+const BUDDY_SCALE_STEP = 10;
 export const BUDDY_SIZE_STEP = 20;
 export function buddyScale(value: number) {
   if (!Number.isFinite(value)) return 100;

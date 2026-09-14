@@ -1,4 +1,4 @@
-export interface MindMapNode {
+interface MindMapNode {
   label: string;
   children: MindMapNode[];
 }

@@ -235,6 +235,21 @@ if (-not (Test-SamePath $projectDir $sourceProjectDir)) {
 if ($Upgrade -and -not (Test-SamePath $projectDir $sourceProjectDir)) {
     $markerPath = Join-Path $projectDir ".papermate-installed.json"
     if (-not (Test-Path -LiteralPath $markerPath)) {
+        # 预编译包安装（应用内自动更新过）里没有源码，也没有源码安装标记。
+        # 这时不能拿源码去覆盖它：既会丢掉包内的运行时结构，也可能把版本降回去。
+        $looksPackaged = (Test-Path -LiteralPath (Join-Path $projectDir "server.js")) -and (Test-Path -LiteralPath (Join-Path $projectDir "node.exe"))
+        if ($looksPackaged) {
+            throw @"
+这个安装目录是预编译包安装（有 server.js / node.exe，但没有源码标记）：
+  $projectDir
+
+  它由应用内自动更新维护，源码升级器不会覆盖它——否则会把版本降回当前源码。
+  想更新请任选一种：
+    * 应用设置里的「检查更新」；
+    * 下载 Release 里的 papermate-windows-x64.zip，解压后运行「一键安装.bat」；
+    * 想用源码装到别处：一键安装.bat 里选一个新的安装位置。
+"@
+        }
         throw "安装目录中没有找到 .papermate-installed.json，请确认这是 PaperMate 的安装位置：$projectDir"
     }
 }

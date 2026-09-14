@@ -181,7 +181,7 @@ export async function saveApiKeys(keys: ApiKeyPair): Promise<void> {
   });
 }
 
-export interface ModelRegistry {
+interface ModelRegistry {
   /** 内置 + 自定义的展示列表（下拉 / 设置页）。 */
   models: ClientModelOption[];
   /** 自定义模型完整配置（含 Key，仅本机）。 */
@@ -210,7 +210,7 @@ export async function deleteCustomModel(id: string): Promise<void> {
   });
 }
 
-export interface DiskBackupInfo {  filePath: string;
+interface DiskBackupInfo {  filePath: string;
   savedAt?: string;
   paperCount: number;
   workspaceCount: number;
@@ -247,13 +247,4 @@ export async function fetchDiskBackup(full = false): Promise<DiskBackupInfo> {
         }
       : undefined,
   };
-}
-
-export async function writeDiskBackup(): Promise<{
-  savedAt: string;
-  filePath: string;
-}> {
-  return requestJson<{ savedAt: string; filePath: string }>("/api/storage/backup", {
-    method: "POST",
-  });
 }

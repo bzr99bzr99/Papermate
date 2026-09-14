@@ -1,6 +1,6 @@
 import type { Paper, PaperWorkspace } from "@/lib/types";
 
-export interface BackupFileRecord {
+interface BackupFileRecord {
   name: string;
   type: string;
   size: number;
@@ -33,7 +33,7 @@ export interface PaperMateBackup {
   settings?: BackupSettings;
 }
 
-export const BACKUP_VERSION = 1 as const;
+const BACKUP_VERSION = 1 as const;
 
 export function isBackup(value: unknown): value is PaperMateBackup {
   if (!value || typeof value !== "object") return false;
@@ -68,7 +68,7 @@ export function isBackupPaper(value: unknown): value is BackupPaper {
   );
 }
 
-export async function blobToBase64(blob: Blob): Promise<string> {
+async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = "";
   const chunkSize = 0x8000;
@@ -78,7 +78,7 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
-export function base64ToBlob(base64: string, type: string): Blob {
+function base64ToBlob(base64: string, type: string): Blob {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {

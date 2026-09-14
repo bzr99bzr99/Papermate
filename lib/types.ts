@@ -4,8 +4,8 @@ export type ModelMode = "fast" | "deep";
 export type ModelProvider = "deepseek" | "glm" | "kimi" | "custom";
 export type PromptKind = "translate" | "context" | "concept" | "free";
 export type ArtifactKind = "notes" | "mindmap" | "writing";
-export type ConversationScope = "normal" | "context";
-export type PaperSectionSource = "outline" | "inferred";
+type ConversationScope = "normal" | "context";
+type PaperSectionSource = "outline" | "inferred";
 
 export interface TextAnchor {
   id: string;
@@ -60,7 +60,7 @@ export interface PdfTextItem {
   blockId?: string;
 }
 
-export interface FigureAsset {
+interface FigureAsset {
   id: string;
   page: number;
   top: number;

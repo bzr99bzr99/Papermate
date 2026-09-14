@@ -11,11 +11,11 @@ export interface ApiKeyPair {
   kimi?: string;
 }
 
-export function apiKeyFilePath(): string {
+function apiKeyFilePath(): string {
   return path.join(process.cwd(), "data", "apikey.txt");
 }
 
-export function parseApiKeyFile(content: string): ApiKeyPair {
+function parseApiKeyFile(content: string): ApiKeyPair {
   const result: ApiKeyPair = {};
   for (const raw of content.split(/\r?\n/)) {
     const line = raw.trim();

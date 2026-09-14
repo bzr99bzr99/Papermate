@@ -1,5 +1,5 @@
 /** 更新状态：既通过 /api/updates 返回给界面，也持久化到 %LOCALAPPDATA%\PaperMate\updates\status.json。 */
-export type UpdatePhase =
+type UpdatePhase =
   | "idle"
   | "checking"
   | "available"
